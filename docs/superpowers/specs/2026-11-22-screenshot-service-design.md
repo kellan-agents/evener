@@ -1,6 +1,6 @@
 # Web screenshot service — design (2026-11-22)
 
-Status: awaiting approval. Companion survey:
+Status: approved 2026-11-22; implemented in `services/screenshot/`. Companion survey:
 `docs/design/2026-11-22-web-app-tooling-survey.md`. Reference product:
 Shelley (`boldsoftware/shelley`), whose chromedp `browser` tool sets the bar for
 device-configured screenshots.
