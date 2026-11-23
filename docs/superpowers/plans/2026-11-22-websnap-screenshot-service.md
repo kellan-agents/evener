@@ -10,6 +10,15 @@
 
 **Spec:** `docs/superpowers/specs/2026-11-22-screenshot-service-design.md` — approved as written by the partner, 2026-11-22. The plan argues from the spec; executors read both.
 
+**Post-review amendment (2026-11-22):** the spec was revised after this plan
+was drafted ("Reviewer questions and their resolutions"): `/pdf` carries no
+`device`/`viewport`; the service host's own loopback is always refused and
+`ALLOW_PRIVATE_ADDRESSES` lifts only private LAN and link-local; tokens
+distribute via the `websnap.env` env-var convention. This plan's Global
+Constraints, Task 2 pdf rules, and Task 4 allowPrivate short-circuit predate
+those resolutions — where plan and spec disagree, the spec wins. The drift was
+caught in the whole-branch review and corrected in the review fix pass.
+
 ## Global Constraints
 
 - New code lives only under `services/screenshot/`. Nothing outside it changes except the spec's status line (Task 10).

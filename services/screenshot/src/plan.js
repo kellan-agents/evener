@@ -1,7 +1,7 @@
 import { resolveDevice } from './devices.js'
 
 function buildContextOptions(req) {
-  if (req.device !== null) {
+  if (req.device) {
     const { descriptor } = resolveDevice(req.device)
     return {
       viewport: { width: descriptor.viewport.width, height: descriptor.viewport.height },
@@ -11,7 +11,7 @@ function buildContextOptions(req) {
       userAgent: descriptor.userAgent,
     }
   }
-  if (req.viewport !== null) {
+  if (req.viewport) {
     return {
       viewport: { width: req.viewport.width, height: req.viewport.height },
       deviceScaleFactor: req.viewport.device_scale_factor,

@@ -15,8 +15,9 @@ export function listDevices() {
 }
 
 export function resolveDevice(name) {
-  const exact = devices[name]
-  if (exact) return { name, descriptor: exact }
+  // Object.hasOwn, not property access: 'constructor'/'__proto__' must be
+  // unknown device names, not inherited object members.
+  if (Object.hasOwn(devices, name)) return { name, descriptor: devices[name] }
   const lower = name.toLowerCase()
   const matches = entries.filter(([n]) => n.toLowerCase() === lower).map(([n]) => n)
   if (matches.length === 1) {

@@ -17,6 +17,8 @@ const blockedIps = [
   'fd12::1',
   '::ffff:127.0.0.1',
   '::ffff:10.0.0.1',
+  '::ffff:7f00:1',
+  '::ffff:a9fe:a9fe',
 ]
 
 for (const ip of blockedIps) {
@@ -62,10 +64,32 @@ test('an IPv6 private literal is blocked', async () => {
   await assertBlocked('http://[fc00::1]/')
 })
 
-test('allowPrivate short-circuits every blocked case', async () => {
-  await assertAllowedHost('http://localhost/x', { allowPrivate: true })
-  await assertAllowedHost('http://[::1]/', { allowPrivate: true })
+test('v4-mapped private IPv6 literals are blocked in every URL form', async () => {
+  // Node's URL parser re-serializes dotted v4-mapped forms to hex, so the
+  // policy must catch both spellings through assertAllowedHost.
+  await assertBlocked('http://[::ffff:127.0.0.1]/')
+  await assertBlocked('http://[::ffff:7f00:1]/')
+  await assertBlocked('http://[::ffff:a9fe:a9fe]/')
+  await assertBlocked('http://[::ffff:10.0.0.1]/')
+})
+
+test('own loopback stays blocked even with allowPrivate', async () => {
+  for (const u of ['http://127.0.0.1/', 'http://[::1]/', 'http://[::ffff:127.0.0.1]/', 'http://localhost/x']) {
+    await assert.rejects(assertAllowedHost(u, { allowPrivate: true }), (err) => {
+      assert.ok(err instanceof WebsnapError)
+      assert.equal(err.code, 'blocked_address')
+      assert.equal(err.status, 400)
+      return true
+    })
+  }
+})
+
+test('allowPrivate lifts private LAN and link-local but not loopback', async () => {
   await assertAllowedHost('http://192.168.1.1/', { allowPrivate: true })
+  await assertAllowedHost('http://10.0.0.5/', { allowPrivate: true })
+  await assertAllowedHost('http://[fc00::1]/', { allowPrivate: true })
+  await assertAllowedHost('http://[fe80::1]/', { allowPrivate: true })
+  await assertAllowedHost('http://[fd12::1]/', { allowPrivate: true })
 })
 
 test('a hostname that fails DNS passes through to navigation', async () => {

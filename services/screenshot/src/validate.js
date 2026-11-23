@@ -116,12 +116,15 @@ const PDF_FORMATS = new Set(['Letter', 'Legal', 'Tabloid', 'Ledger', 'A0', 'A1',
 
 export function parsePdfBody(raw) {
   if (!isPlainObject(raw)) return fail('body')
-  const unknown = rejectUnknownKeys(raw, new Set(['url', 'device', 'viewport', 'format', 'print_background', 'timeout_ms']))
+  // device/viewport are deliberately absent from pdf bodies: Playwright's
+  // page.pdf() lays out at print media and paper size, so emulation would be
+  // a silent no-op — absent rather than decorative (spec).
+  const unknown = rejectUnknownKeys(raw, new Set(['url', 'format', 'print_background', 'timeout_ms']))
   if (unknown !== null) return fail(unknown, 'unknown_field')
 
   const common = parseCommon(raw)
   if (common.error) return common.error
-  const { url, device, viewport, timeout_ms } = common
+  const { url, timeout_ms } = common
 
   const format = raw.format === undefined ? 'A4' : raw.format
   if (!PDF_FORMATS.has(format)) return fail('format')
@@ -131,7 +134,7 @@ export function parsePdfBody(raw) {
 
   return {
     ok: true,
-    req: { url, device, viewport, format, print_background, timeout_ms },
+    req: { url, format, print_background, timeout_ms },
   }
 }
 

@@ -75,8 +75,3 @@ test('buildPdfPlan mirrors overrides', () => {
   assert.deepEqual(plan.pdfOptions, { format: 'Letter', printBackground: false })
   assert.deepEqual(plan.gotoOptions, { waitUntil: 'load', timeout: 45000 })
 })
-
-test('buildPdfPlan accepts a device preset', () => {
-  const plan = buildPdfPlan(pdf({ url, device: 'iPhone 15' }))
-  assert.equal(plan.contextOptions.isMobile, true)
-})

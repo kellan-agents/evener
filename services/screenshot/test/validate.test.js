@@ -106,7 +106,8 @@ test('screenshot selector round-trips', () => {
 const pdfFailures = [
   ['missing url', {}, 'url'],
   ['bad protocol', { url: 'gopher://example.com/' }, 'url'],
-  ['device and viewport both', { url, device: 'iPad (gen 7)', viewport: { width: 10, height: 10 } }, 'device'],
+  ['device is absent from pdf bodies', { url, device: 'iPhone 15' }, 'device', 'unknown_field'],
+  ['viewport is absent from pdf bodies', { url, viewport: { width: 10, height: 10 } }, 'viewport', 'unknown_field'],
   ['format outside enum', { url, format: 'A6' }, 'format'],
   ['unknown key', { url, margin: 1 }, 'margin', 'unknown_field'],
   ['print_background must be boolean', { url, print_background: 'yes' }, 'print_background'],
@@ -123,8 +124,6 @@ test('pdf minimal body normalizes with defaults', () => {
     ok: true,
     req: {
       url,
-      device: null,
-      viewport: null,
       format: 'A4',
       print_background: true,
       timeout_ms: 30000,
@@ -135,12 +134,7 @@ test('pdf minimal body normalizes with defaults', () => {
 test('pdf explicit values round-trip', () => {
   const { ok, req } = parsePdfBody({ url, format: 'Letter', print_background: false, timeout_ms: 45000 })
   assert.equal(ok, true)
-  assert.deepEqual(req, { url, device: null, viewport: null, format: 'Letter', print_background: false, timeout_ms: 45000 })
-})
-
-test('pdf accepts a device preset name', () => {
-  const { req } = parsePdfBody({ url, device: 'Pixel 7' })
-  assert.equal(req.device, 'Pixel 7')
+  assert.deepEqual(req, { url, format: 'Letter', print_background: false, timeout_ms: 45000 })
 })
 
 async function assertRejects(promise, { status, code, detailCheck }) {

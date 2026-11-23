@@ -33,6 +33,11 @@ PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 npm ci
 
 Start: `WEBSNAP_TOKEN=<token> node src/main.js`
 
+Token distribution follows the lunaroute precedent: the value lives in
+`~/.config/evener/websnap.env` (`export WEBSNAP_TOKEN=…`, plus `WEBSNAP_URL`
+for clients); every example below references the env var — a token is never
+pasted inline into a curl command, so it never lands in a transcript or log.
+
 ## Endpoints
 
 Every route requires `Authorization: Bearer <token>`.
@@ -87,8 +92,11 @@ curl -sS -H "Authorization: Bearer $WEBSNAP_TOKEN" \
 
 ### `POST /pdf`
 
-Body: `{url, device? | viewport?, format? (Letter|Legal|Tabloid|Ledger|A0–A5,
-default A4), print_background? (default true), timeout_ms?}` → PDF bytes.
+Body: `{url, format? (Letter|Legal|Tabloid|Ledger|A0–A5, default A4),
+print_background? (default true), timeout_ms?}` → PDF bytes. No
+`device`/`viewport` on `/pdf`: Playwright's PDF layout renders at print media
+and paper size, so emulation would be a silent no-op — the parameters are
+absent rather than decorative.
 
 ```bash
 curl -sS -H "Authorization: Bearer $WEBSNAP_TOKEN" \
@@ -144,12 +152,16 @@ reason where none is installed.
 
 - The token is required on every route; a missing `WEBSNAP_TOKEN` at launch
   means the process refuses to start, so it never runs open.
-- By default the service refuses to screenshot loopback, private, and
-  link-local addresses (and v4-mapped/v6 forms). On a trusted home LAN,
-  `ALLOW_PRIVATE_ADDRESSES=true` opens LAN targets — the token is then the
-  only barrier.
-- **Accepted risk:** the hostname range check resolves the target once, at
-  validation; Playwright resolves it again at connect. A public hostname that
-  rebinds to a private address between the two is stopped by the token, not by
-  the range check. This is a trusted-network posture, not an internet-facing
-  one; do not expose the service to an untrusted network.
+- The service host's own loopback (`127.0.0.0/8`, `::1`, and v4-mapped forms)
+  is **always refused**, regardless of flags — a token-holder can never
+  probe the deploy host's localhost services. All other private and
+  link-local ranges are refused by default; `ALLOW_PRIVATE_ADDRESSES=true`
+  lifts exactly those — private LAN and link-local, needed on the home
+  network to screenshot dev servers on other sprites — never loopback.
+- **Accepted risk:** the policy check resolves the target once, at
+  validation; navigation resolves it again and follows HTTP redirects. A
+  public hostname that rebinds to a private address, or a public URL that
+  redirects to a private target, renders unchecked — those are stopped by
+  the token, not by the range check. This is a trusted-network posture, not
+  an internet-facing one; do not expose the service to an untrusted
+  network.

@@ -208,16 +208,29 @@ test('a private URL is blocked before the core and never reaches it', async () =
   await s.stop()
 })
 
-test('allowPrivateAddresses lets the same request through to the core', async () => {
+test('allowPrivateAddresses lets private LAN targets through to the core', async () => {
   const s = await startServer({ configOverrides: { allowPrivateAddresses: true } })
   const { status, text } = await call(s.base, {
     method: 'POST',
     path: '/screenshot',
-    body: { url: 'http://localhost/x' },
+    body: { url: 'http://192.168.1.1/x' },
   })
   assert.equal(status, 200)
   assert.equal(text, 'fakepng')
   assert.equal(s.seen.length, 1)
+  await s.stop()
+})
+
+test('loopback stays blocked even with allowPrivateAddresses', async () => {
+  const s = await startServer({ configOverrides: { allowPrivateAddresses: true } })
+  const { status, json } = await call(s.base, {
+    method: 'POST',
+    path: '/screenshot',
+    body: { url: 'http://localhost/x' },
+  })
+  assert.equal(status, 400)
+  assert.equal(json.error, 'blocked_address')
+  assert.equal(s.seen.length, 0, 'the core must not see a loopback request')
   await s.stop()
 })
 

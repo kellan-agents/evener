@@ -32,6 +32,17 @@ test('resolveDevice matches case-insensitively', () => {
   assert.equal(name, 'iPhone 15')
 })
 
+test('prototype-named devices are unknown, never a 500', () => {
+  for (const name of ['constructor', 'toString', '__proto__', 'hasOwnProperty']) {
+    assert.throws(() => resolveDevice(name), (err) => {
+      assert.ok(err instanceof WebsnapError)
+      assert.equal(err.code, 'unknown_device')
+      assert.equal(err.status, 400)
+      return true
+    })
+  }
+})
+
 test('resolveDevice throws a 400 unknown_device for a bogus name', () => {
   assert.throws(() => resolveDevice('Nokia 3310'), (err) => {
     assert.ok(err instanceof WebsnapError)
