@@ -1246,7 +1246,7 @@ func TestNavigationMergeProjectBucketsOrdersMergedRowByName(t *testing.T) {
 
 // Merging a project's groups unions their tiers; the union keeps the sidebar's
 // creation order rather than reverting to update order.
-func TestNavigationMergeProjectGroupsKeepsProjectSessionsInCreationOrder(t *testing.T) {
+func TestNavigationMergeProjectGroupsKeepsProjectSessionsInActivityOrder(t *testing.T) {
 	now := time.Unix(1_700_000_000, 0).UTC()
 	row := func(id string, createdAgo, updatedAgo time.Duration) hubcore.TreeNode {
 		return hubcore.TreeNode{ID: id, Title: id, Project: "shared", Kind: "session", State: "idle",
@@ -1273,8 +1273,8 @@ func TestNavigationMergeProjectGroupsKeepsProjectSessionsInCreationOrder(t *test
 	for _, node := range merged.active[0].Current {
 		got = append(got, node.ID)
 	}
-	if want := []string{"newer-created", "older-created"}; !reflect.DeepEqual(got, want) {
-		t.Fatalf("merged current order = %v, want %v (newest creation first)", got, want)
+	if want := []string{"older-created", "newer-created"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("merged current order = %v, want %v (newest last activity first)", got, want)
 	}
 }
 

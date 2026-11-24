@@ -58,7 +58,7 @@ func FuzzHubcoreScenarios(f *testing.F) {
 		fuzzScenarioBuildTree_NoProjectFallback,
 		fuzzScenarioBuildTree_OrdersLiveRowsWithoutMetasByStartedAtAndID,
 		fuzzScenarioBuildTree_OrdersMixedLiveRowsByMergedMetadata,
-		fuzzScenarioBuildTree_OrdersProjectSessionsByCreatedTitleAndID,
+		fuzzScenarioBuildTree_OrdersProjectSessionsByActivityThenTitleAndID,
 		fuzzScenarioBuildTree_OrdersProjectsByName,
 		fuzzScenarioBuildTree_OrdersProjectsByNameNotLastActivity,
 		fuzzScenarioBuildTree_PathEnteredNonManagedWorktreeAlsoGroupsByRestoreRoot,

@@ -1206,7 +1206,7 @@ func reportedRollupState(state string, askPending, approvalPending bool) string 
 // tiers, capped, rolled up and placed active or archived.
 func (b *treeBuilder) buildProject(acc *projectAccum, workingRoots map[string]bool) TreeProject {
 
-	// Sort newest-created first.
+	// Sort newest last-activity first.
 	sortSessionMetas(acc.topLevel, ProjectSessionOrderLess)
 
 	sessions := make([]TreeNode, 0, len(acc.topLevel))

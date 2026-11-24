@@ -446,8 +446,9 @@ func navigationMergeProjectGroupsContext(ctx context.Context, projects []hubcore
 // the struct:
 //
 //   - Current / Recent / Archived are the union of every group's rows, ordered
-//     the way hubcore orders its own tiers (newest created first: CreatedAt
-//     desc, then title, then ID - ProjectSessionOrderLess).
+//     the way hubcore orders its own tiers (newest last-activity first:
+//     UpdatedAt desc with CreatedAt as its missing-update fallback, then
+//     title, then ID - ProjectSessionOrderLess).
 //     The per-tier overflow counts (MoreCurrent / MoreRecent / MoreArchived)
 //     are recomputed against maxSidebarSessionsPerTier rather than summed:
 //     More* is how many rows of the union lie beyond the cap a tree-built
@@ -548,7 +549,7 @@ func navigationMergeProjectContext(ctx context.Context, first hubcore.TreeProjec
 // It reads TierRows rather than the public slice because a tree-built project
 // keeps its overflow in the private uncapped tier, and the merged project must
 // carry that overflow too. The union must then be re-ordered: each group is
-// internally newest-created-first, but appending one group after the other is
+// internally newest-activity-first, but appending one group after the other is
 // not globally ordered, so the merge sorts by the field and tie-break the tree
 // and capTier rely on (hubcore.ProjectTreeNodeLess). Sorting the concatenated
 // union once - rather than re-sorting the accumulated rows after each group

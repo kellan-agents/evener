@@ -629,12 +629,12 @@ func fuzzScenarioLiveTier_ApprovalRanksWithAwaiting(t *testing.T) {
 	}
 }
 
-func fuzzScenarioBuildTree_OrdersProjectSessionsByCreatedTitleAndID(t *testing.T) {
+func fuzzScenarioBuildTree_OrdersProjectSessionsByActivityThenTitleAndID(t *testing.T) {
 	updated := time.Date(2026, 5, 11, 12, 0, 0, 0, time.UTC)
 	metas := []schema.SessionMeta{
 		{ID: "02wMz5Txv2enqVTitaig6F", CreatedAt: updated.Add(-2 * time.Hour), UpdatedAt: updated, OriginalPrompt: "beta task",
 			EnvInfo: schema.EnvironmentInfo{WorkingDir: "/projects/alpha"}},
-		{ID: "02wMz5Txv1C3Hut0M8GCeB", CreatedAt: updated.Add(-time.Hour), UpdatedAt: updated, OriginalPrompt: "alpha task",
+		{ID: "02wMz5Txv1C3Hut0M8GCeB", CreatedAt: updated.Add(-4 * time.Hour), UpdatedAt: updated.Add(-3 * time.Hour), OriginalPrompt: "alpha task",
 			EnvInfo: schema.EnvironmentInfo{WorkingDir: "/projects/alpha"}},
 		{ID: "02wMz5Txv47YP64RR3B9YJ", CreatedAt: updated.Add(-3 * time.Hour), UpdatedAt: updated, OriginalPrompt: "bravo task",
 			EnvInfo: schema.EnvironmentInfo{WorkingDir: "/projects/alpha"}},
@@ -653,10 +653,11 @@ func fuzzScenarioBuildTree_OrdersProjectSessionsByCreatedTitleAndID(t *testing.T
 	for _, node := range sessions {
 		got = append(got, node.ID)
 	}
-	// Newest creation first. The two oldest share an instant, so title then ID
-	// break that tie. The newest-updated row is not the newest-created one, so
-	// an update-time sort cannot produce this order.
-	want := []string{"02wMz5Txv1C3Hut0M8GCeB", "02wMz5Txv2enqVTitaig6F", "02wMz5Txv5aIxgf9yVdd0N", "02wMz5Txv47YP64RR3B9YJ"}
+	// Newest last activity first. The two rows touched at `updated` share
+	// that instant, so title then ID break that tie ("beta task" before
+	// "bravo task"). The oldest-activity row is neither the oldest- nor
+	// newest-created one, so a creation sort cannot produce this order.
+	want := []string{"02wMz5Txv2enqVTitaig6F", "02wMz5Txv47YP64RR3B9YJ", "02wMz5Txv5aIxgf9yVdd0N", "02wMz5Txv1C3Hut0M8GCeB"}
 	if strings.Join(got, ",") != strings.Join(want, ",") {
 		t.Fatalf("order=%v, want %v", got, want)
 	}
@@ -2067,6 +2068,37 @@ func fuzzScenarioProjectArchiveDecisionUsesCanonicalID(t *testing.T) {
 	tree = BuildTreeAtWithProjects([]schema.SessionMeta{mk("01A", aFoo), mk("01B", bFoo)}, nil, precedence, now, projects)
 	if len(tree.Projects) != 2 {
 		t.Fatalf("canonical unarchive should leave both active; got %+v", tree)
+	}
+}
+
+// A project's session list is ordered by last activity, not creation:
+// a session created earlier but touched later sorts first.
+func TestBuildTreeProjectSessionsOrderByLastActivity(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+	metas := []schema.SessionMeta{
+		{
+			ID:        "newer-created-stale",
+			CreatedAt: now.Add(-1 * time.Hour),
+			UpdatedAt: now.Add(-30 * time.Minute),
+			EnvInfo:   schema.EnvironmentInfo{WorkingDir: "/w/order"},
+		},
+		{
+			ID:        "older-created-fresh",
+			CreatedAt: now.Add(-48 * time.Hour),
+			UpdatedAt: now.Add(-5 * time.Minute),
+			EnvInfo:   schema.EnvironmentInfo{WorkingDir: "/w/order"},
+		},
+	}
+	tree := BuildTreeAt(metas, nil, nil, now)
+	if len(tree.Projects) != 1 {
+		t.Fatalf("projects = %d, want 1", len(tree.Projects))
+	}
+	rows, ok := tree.Projects[0].TierRows("current")
+	if !ok || len(rows) != 2 {
+		t.Fatalf("current rows = %d ok=%v, want 2, true", len(rows), ok)
+	}
+	if rows[0].ID != "older-created-fresh" {
+		t.Fatalf("project order = [%s, %s], want last-activity first: [older-created-fresh, newer-created-stale]", rows[0].ID, rows[1].ID)
 	}
 }
 

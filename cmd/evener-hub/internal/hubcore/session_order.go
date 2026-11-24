@@ -28,18 +28,25 @@ func SessionOrderLess(a, b SessionOrderKey) bool {
 	if !au.Equal(bu) {
 		return au.After(bu)
 	}
-	return ProjectSessionOrderLess(a, b)
-}
-
-// ProjectSessionOrderLess reports whether a sorts before b in a project's
-// session list: newest creation first, then title, then ID. Update time is not
-// part of the key, so a running session keeps its row instead of moving to the
-// top whenever it is touched.
-func ProjectSessionOrderLess(a, b SessionOrderKey) bool {
 	ac := OrderCreatedAt(a.Created, a.Updated)
 	bc := OrderCreatedAt(b.Created, b.Updated)
 	if !ac.Equal(bc) {
 		return ac.After(bc)
+	}
+	if cmp := compareOrderText(a.Title, b.Title); cmp != 0 {
+		return cmp < 0
+	}
+	return compareOrderText(a.ID, b.ID) < 0
+}
+
+// ProjectSessionOrderLess reports whether a sorts before b in a project's
+// session list: newest last activity first (a session with no recorded
+// update falls back to its creation time), then title, then ID.
+func ProjectSessionOrderLess(a, b SessionOrderKey) bool {
+	au := OrderUpdatedAt(a.Updated, a.Created)
+	bu := OrderUpdatedAt(b.Updated, b.Created)
+	if !au.Equal(bu) {
+		return au.After(bu)
 	}
 	if cmp := compareOrderText(a.Title, b.Title); cmp != 0 {
 		return cmp < 0
