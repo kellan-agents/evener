@@ -658,7 +658,7 @@ function projectIsLoading(p: RailProject): boolean {
   return p.sessions.length === 0 && p.loaded !== true && (p.session_count ?? 0) > 0;
 }
 
-/** A project's active-tier session rows, newest-created first. `hostId`
+/** A project's active-tier session rows, newest-activity first. `hostId`
  * narrows to one host's rows for the grouped variants. */
 function activeSessionNodes(p: RailProject, hostId?: string): SessionRailNode[] {
   return p.sessions

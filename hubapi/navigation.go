@@ -289,8 +289,9 @@ type NavigationSessionSummary struct {
 	Archived  bool       `json:"archived,omitempty"`
 	UpdatedAt *time.Time `json:"updated_at,omitempty"`
 	// CreatedAt is when the session started. A project's rows are ordered by
-	// it, newest first, so a client that joins the Current and Recent tiers
-	// can keep that order across the tier boundary.
+	// last activity (UpdatedAt, with CreatedAt standing in when a session has
+	// no recorded update), newest first, so a client that joins the Current
+	// and Recent tiers can keep that order across the tier boundary.
 	CreatedAt     *time.Time `json:"created_at,omitempty"`
 	MoreSubagents int        `json:"more_subagents,omitempty"`
 	// Subagents is a live root's whole-tree subagent tally, counted by its

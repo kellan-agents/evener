@@ -19,7 +19,7 @@ function row(overrides: Partial<RailSession>): RailSession {
 }
 
 describe("project session order", () => {
-  test("joins the current and recent tiers newest-created first", () => {
+  test("joins the current and recent tiers newest-activity first", () => {
     const current = row({
       ref: "local:current",
       row_id: "navigation:local:current",
@@ -34,10 +34,10 @@ describe("project session order", () => {
       created_at: "2026-06-01T00:00:00Z",
       updated_at: "2026-06-02T00:00:00Z",
     });
-    expect([current, recent].sort(compareProjectSessions)).toEqual([recent, current]);
+    expect([current, recent].sort(compareProjectSessions)).toEqual([current, recent]);
   });
 
-  test("a later update does not move a row past a newer-created one", () => {
+  test("a later update moves a row above a newer-created one", () => {
     const olderCreated = row({
       ref: "local:older",
       row_id: "navigation:local:older",
@@ -52,12 +52,12 @@ describe("project session order", () => {
       created_at: "2026-06-01T00:00:00Z",
       updated_at: "2026-06-01T00:00:00Z",
     });
-    expect([olderCreated, newerCreated].sort(compareProjectSessions)).toEqual([newerCreated, olderCreated]);
+    expect([olderCreated, newerCreated].sort(compareProjectSessions)).toEqual([olderCreated, newerCreated]);
   });
 
-  test("falls back to updated_at for a hub without created_at", () => {
-    const older = row({ row_id: "navigation:old", updated_at: "2026-01-01T00:00:00Z" });
-    const newer = row({ row_id: "navigation:new", updated_at: "2026-06-01T00:00:00Z" });
+  test("falls back to created_at for a row without updated_at", () => {
+    const older = row({ row_id: "navigation:old", created_at: "2026-01-01T00:00:00Z" });
+    const newer = row({ row_id: "navigation:new", created_at: "2026-06-01T00:00:00Z" });
     expect([older, newer].sort(compareProjectSessions)).toEqual([newer, older]);
   });
 

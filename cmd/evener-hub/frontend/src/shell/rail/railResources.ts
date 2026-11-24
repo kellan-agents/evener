@@ -135,18 +135,18 @@ function projectPageDependencies(states: readonly GraphResource[]): ProjectPageD
   });
 }
 
-function sessionCreatedAt(row: RailSession): number | undefined {
-  const stamp = row.created_at ?? row.updated_at;
+function sessionLastActivity(row: RailSession): number | undefined {
+  const stamp = row.updated_at ?? row.created_at;
   const parsed = stamp ? Date.parse(stamp) : Number.NaN;
   return Number.isNaN(parsed) ? undefined : parsed;
 }
 
-/** Orders a project's joined Current and Recent rows newest-created first,
- * matching the hub's project session comparator. A hub that predates
- * created_at falls back to updated_at. */
+/** Orders a project's joined Current and Recent rows newest-activity first,
+ * matching the hub's project session comparator. A row without updated_at
+ * (from a hub that predates it) falls back to created_at. */
 export function compareProjectSessions(a: RailSession, b: RailSession): number {
-  const at = sessionCreatedAt(a);
-  const bt = sessionCreatedAt(b);
+  const at = sessionLastActivity(a);
+  const bt = sessionLastActivity(b);
   // Untimestamped rows form one class at the end; two of them keep their
   // input order. Treating a row with one timestamped neighbour as equal to
   // both would make the comparator non-transitive.
