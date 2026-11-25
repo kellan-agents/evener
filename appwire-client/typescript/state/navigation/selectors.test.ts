@@ -45,6 +45,22 @@ test.each([
     },
     "nav3/project_page///bm8tcHJvamVjdA/Y3VycmVudA/1/2/catalog/archived_projects",
   ],
+  [
+    { kind: "project_page", projectKey: "project", tier: "current", offset: 0, limit: 50, sortKey: "lastActivity" },
+    "nav3/project_page///cHJvamVjdA/Y3VycmVudA/0/50/sort/lastActivity",
+  ],
+  [
+    {
+      kind: "project_page",
+      projectKey: "no-project",
+      catalog: "archived_projects",
+      tier: "current",
+      offset: 1,
+      limit: 2,
+      sortKey: "lastActivity",
+    },
+    "nav3/project_page///bm8tcHJvamVjdA/Y3VycmVudA/1/2/catalog/archived_projects/sort/lastActivity",
+  ],
 ] as const)("navigation view scope matches Go parity vector %#", (key, expected) => {
   expect(navigationViewScope(key as ResourceKey)).toBe(expected);
 });

@@ -41,6 +41,11 @@ export type ResourceKey =
       tier: "current" | "recent" | "archived";
       offset: number;
       limit: number;
+      // How the hub orders the page's rows: absent (or "") is the createdAt
+      // order reads have always served, "lastActivity" orders by each row's
+      // last activity with created_at as fallback. Part of the key because
+      // the hub serves and caches the two orders separately.
+      sortKey?: string;
     }
   | { kind: "location"; ref: string };
 
@@ -110,6 +115,7 @@ export function navigationParamsToResourceKey(params: NavigationReadParams): Res
         ...(params.catalog ? { catalog: params.catalog as NavigationCatalog } : {}),
         tier: params.tier as "current" | "recent" | "archived",
         ...paged(NAVIGATION_SECTION_LIMIT),
+        ...(params.sortKey ? { sortKey: params.sortKey } : {}),
       };
     case "location":
       return { kind: "location", ref: params.ref as string };
@@ -167,7 +173,11 @@ export function navigationViewScope(key: ResourceKey): string {
   const scope = `nav3/${kind}/${rawBase64URL(id)}/${rawBase64URL(sectionID)}/${rawBase64URL(projectKey)}/${rawBase64URL(tier)}/${offset}/${limit}`;
   // Only a catalog-narrowed read carries its catalog, as the hub's
   // navigationViewScope appends it.
-  return catalog ? `${scope}/catalog/${catalog}` : scope;
+  const narrowed = catalog ? `${scope}/catalog/${catalog}` : scope;
+  // Only a project page read that names a sort key carries it, so every
+  // other view keeps the scope it always had - as the hub's
+  // navigationViewScope appends it.
+  return key.kind === "project_page" && key.sortKey ? `${narrowed}/sort/${key.sortKey}` : narrowed;
 }
 
 export function navigationRootContainerKey(key: ResourceKey, slot: string): string {
@@ -213,7 +223,7 @@ export type NavigationRequest<T = unknown> = (
 export type ResourceListener = (state: ResourceState) => void;
 export function keyID(key: ResourceKey): string {
   const fields: Record<string, unknown> = { kind: key.kind };
-  for (const name of ["catalog", "limit", "offset", "projectKey", "ref", "section", "sectionId", "tier"]) {
+  for (const name of ["catalog", "limit", "offset", "projectKey", "ref", "section", "sectionId", "sortKey", "tier"]) {
     if (name in key) fields[name] = (key as Record<string, unknown>)[name];
   }
   return JSON.stringify(fields);

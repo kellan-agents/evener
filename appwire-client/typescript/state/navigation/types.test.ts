@@ -1,6 +1,6 @@
 import { expect, test } from "vitest";
 import type { NavigationReadParams } from "../../types.gen";
-import { NAVIGATION_CATALOG_LIMIT, NAVIGATION_SECTION_LIMIT, navigationParamsToResourceKey } from "./types";
+import { keyID, NAVIGATION_CATALOG_LIMIT, NAVIGATION_SECTION_LIMIT, navigationParamsToResourceKey } from "./types";
 
 // The hub serves an omitted `limit` as the MAXIMUM for the resource's family,
 // not one shared default: navigationReadPage in cmd/evener-hub/app_navigation.go
@@ -45,4 +45,54 @@ test("an explicit page wins over the maximum, and an unpaged resource carries no
     kind: "location",
     ref: "local:a",
   });
+});
+
+// A project_page read's sort key names a different resource from the same
+// page in the default order: the hub keys its cache, etag and view scope by
+// it (navigationReadKeyWithFields in cmd/evener-hub/app_navigation.go,
+// navigationViewScope in cmd/evener-hub/navigation_cache.go), so the client
+// key must carry it or both orders share one cached entry. An absent sort key
+// - or an empty string, the wire's default - is the createdAt order the hub
+// has always served, and keeps the key that read always had.
+test("project_page params carry the sort key only when one is named", () => {
+  expect(
+    navigationParamsToResourceKey({
+      representationVersion: 3,
+      resource: "project_page",
+      projectKey: "p",
+      tier: "current",
+      sortKey: "lastActivity",
+    }),
+  ).toEqual({
+    kind: "project_page",
+    projectKey: "p",
+    tier: "current",
+    offset: 0,
+    limit: 50,
+    sortKey: "lastActivity",
+  });
+  const defaultPage = { kind: "project_page", projectKey: "p", tier: "current", offset: 0, limit: 50 };
+  expect(
+    navigationParamsToResourceKey({
+      representationVersion: 3,
+      resource: "project_page",
+      projectKey: "p",
+      tier: "current",
+    }),
+  ).toEqual(defaultPage);
+  expect(
+    navigationParamsToResourceKey({
+      representationVersion: 3,
+      resource: "project_page",
+      projectKey: "p",
+      tier: "current",
+      sortKey: "",
+    }),
+  ).toEqual(defaultPage);
+});
+
+test("keyID distinguishes project pages that differ only by sort key", () => {
+  const page = { kind: "project_page", projectKey: "p", tier: "current", offset: 0, limit: 50 } as const;
+  expect(keyID(page)).not.toBe(keyID({ ...page, sortKey: "lastActivity" }));
+  expect(keyID({ ...page, sortKey: "createdAt" })).not.toBe(keyID({ ...page, sortKey: "lastActivity" }));
 });

@@ -615,6 +615,7 @@ function resourceKeyValid(key: ResourceKey): boolean {
     return (
       identity(key.projectKey) &&
       ["current", "recent", "archived"].includes(key.tier) &&
+      ["", "createdAt", "lastActivity"].includes(key.sortKey ?? "") &&
       selector(key.offset) &&
       selector(key.limit)
     );

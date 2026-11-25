@@ -1240,6 +1240,68 @@ test("setExpanded issues a v3 project read with the raw key and representation v
   ]);
 });
 
+// A sorted project page is a different resource from the same page in the
+// default order: the hub keys its cache, etag and view scope by sortKey
+// (cmd/evener-hub/navigation_cache.go), so the store must key its resource
+// state by it too, or a client toggling the order would read the other
+// order's cached entry as its own.
+test("project pages with different sort keys read separately and share no cache entry", async () => {
+  const calls: NavigationReadParams[] = [];
+  const row = (ref: string) => completeSession({ ref, title: ref, project: "p", live: true });
+  await init((params) => {
+    calls.push(params);
+    if (params.resource === "manifest") return wireSnapshot(params, emptyManifest());
+    const sorted = params.sortKey === "lastActivity";
+    return wireSnapshot(
+      params,
+      { sessions: [row(sorted ? "sorted-1" : "default-1")], remaining: 0, truncated: false },
+      sorted ? '"sorted"' : '"default"',
+    );
+  });
+  await store.getState().loadProjectPage("p", "current", 0, 50, "lastActivity");
+  expect(calls).toContainEqual({
+    resource: "project_page",
+    projectKey: "p",
+    tier: "current",
+    offset: 0,
+    limit: 50,
+    sortKey: "lastActivity",
+    representationVersion: 3,
+  });
+  const sortedID = keyID({
+    kind: "project_page",
+    projectKey: "p",
+    tier: "current",
+    offset: 0,
+    limit: 50,
+    sortKey: "lastActivity",
+  });
+  const defaultID = keyID({ kind: "project_page", projectKey: "p", tier: "current", offset: 0, limit: 50 });
+  expect(sortedID).not.toBe(defaultID);
+  const sortedPage = store.getState().resources.get(sortedID);
+  expect(sortedPage?.etag).toBe('"sorted"');
+  expect((sortedPage?.data as { sessions: Array<{ ref: string }> } | null)?.sessions.map((item) => item.ref)).toEqual([
+    "sorted-1",
+  ]);
+  expect(store.getState().resources.has(defaultID)).toBe(false);
+
+  await store.getState().loadProjectPage("p", "current", 0, 50);
+  expect(calls).toContainEqual({
+    resource: "project_page",
+    projectKey: "p",
+    tier: "current",
+    offset: 0,
+    limit: 50,
+    representationVersion: 3,
+  });
+  const defaultPage = store.getState().resources.get(defaultID);
+  expect(defaultPage?.etag).toBe('"default"');
+  expect((defaultPage?.data as { sessions: Array<{ ref: string }> } | null)?.sessions.map((item) => item.ref)).toEqual([
+    "default-1",
+  ]);
+  expect(store.getState().resources.get(sortedID)).toBe(sortedPage);
+});
+
 test("notification fencing rejects duplicate, wrong generation, and gaps while locations stay retained", async () => {
   const client = new FakeClient("ready");
   client.on("evener/navigation/read", (params) =>

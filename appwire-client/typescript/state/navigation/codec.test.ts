@@ -1082,6 +1082,77 @@ test.each([
   ]);
 });
 
+// The hub pins a sorted project page's entities and containers to its own
+// view scope, appending /sort/ after any catalog suffix (navigationViewScope
+// in cmd/evener-hub/navigation_cache.go). The client's scope must agree or
+// materialization reads a root container the hub never sent, so the scope
+// strings below are the hub's own parity vectors, not values this client's
+// scope function computes.
+const sortedPageSnapshot = (scope: string): NavigationSnapshot => {
+  const session = `${scope}/entity/${"1".repeat(64)}`;
+  return {
+    metadata: {
+      generation_id: "g",
+      revision: 1,
+      key: "project",
+      tier: "current",
+      offset: 0,
+      limit: 50,
+      remaining: 0,
+      truncated: false,
+    },
+    entities: [{ key: session, kind: "session", value: sessionValue("local:session") }],
+    containers: [
+      { key: `${scope}/root/sessions`, owner: { kind: "resource_root", slot: "sessions" }, children: [session] },
+      {
+        key: navigationOwnedContainerKey(session, "children"),
+        owner: { kind: "entity", entityKey: session, slot: "children" },
+        children: [],
+      },
+    ],
+  };
+};
+
+test.each(["createdAt", "lastActivity"] as const)(
+  "codec decodes a project page sorted by %s under the hub's sort scope",
+  (sortKey) => {
+    const sorted = {
+      kind: "project_page",
+      projectKey: "project",
+      tier: "current",
+      offset: 0,
+      limit: 50,
+      sortKey,
+    } as const;
+    const hubScope = `nav3/project_page///cHJvamVjdA/Y3VycmVudA/0/50/sort/${sortKey}`;
+    const decoded = decodeNavigationResponse(sorted, undefined, snapshotResponse(sorted, sortedPageSnapshot(hubScope)));
+    expect(decoded.status).toBe("snapshot");
+    if (decoded.status !== "snapshot") return;
+    const materialized = materializeNavigationResource({
+      key: sorted,
+      graph: normalizedGraphFromSnapshot(decoded.snapshot),
+      version: base,
+      presence: "present",
+    }) as { sessions: Array<{ ref: string }> };
+    expect(materialized.sessions.map((row) => row.ref)).toEqual(["local:session"]);
+  },
+);
+
+// The hub refuses a sort key outside its vocabulary before any read is served
+// (navigationReadKeyWithFields in cmd/evener-hub/app_navigation.go), so a key
+// carrying one can name no real resource and the codec must refuse it too.
+test("codec refuses a project page naming a sort key outside the wire vocabulary", () => {
+  const bogus = {
+    kind: "project_page",
+    projectKey: "project",
+    tier: "current",
+    offset: 0,
+    limit: 50,
+    sortKey: "bogus",
+  } as const;
+  expectContentFreeRejection(bogus, sortedPageSnapshot("nav3/project_page///cHJvamVjdA/Y3VycmVudA/0/50/sort/bogus"));
+});
+
 test("generic materialization invalidates recursive ancestors without changing siblings", () => {
   const parentKey = entityKey(key, "1");
   const childKey = entityKey(key, "2");

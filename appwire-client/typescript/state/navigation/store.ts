@@ -130,6 +130,7 @@ export interface NavigationStoreState {
     tier: "current" | "recent" | "archived",
     offset?: number,
     limit?: number,
+    sortKey?: "" | "createdAt" | "lastActivity",
   ): Promise<ResourceState<NavigationProjectPage>>;
   lookupLocation(ref: string): Promise<ResourceState<NavigationSessionLocation>>;
   /** Records one rail row's expand state under any rail node id (a project's
@@ -276,6 +277,7 @@ function paramsFor(k: ResourceKey, base: NavigationReadBase | undefined): Naviga
         tier: k.tier,
         offset: k.offset,
         limit: k.limit,
+        ...(k.sortKey ? { sortKey: k.sortKey } : {}),
         ...conditional,
       };
     case "location":
@@ -659,8 +661,21 @@ export function createNavigationStore({ persistence }: NavigationStoreDeps): Nav
         revalidator.track(resourceKey, requestFor(resourceKey, activeClient));
       },
       loadProject: (projectKey: string) => withProjectRecovery(projectKey),
-      loadProjectPage: (projectKey: string, tier: "current" | "recent" | "archived", offset = 0, limit = PAGE_LIMIT) =>
-        load<NavigationProjectPage>({ kind: "project_page", projectKey, tier, offset, limit }),
+      loadProjectPage: (
+        projectKey: string,
+        tier: "current" | "recent" | "archived",
+        offset = 0,
+        limit = PAGE_LIMIT,
+        sortKey: "" | "createdAt" | "lastActivity" = "",
+      ) =>
+        load<NavigationProjectPage>({
+          kind: "project_page",
+          projectKey,
+          tier,
+          offset,
+          limit,
+          ...(sortKey ? { sortKey } : {}),
+        }),
       lookupLocation: (ref: string) => load<NavigationSessionLocation>({ kind: "location", ref }),
       awaitNavigationTargets: (targets: NavigationInvalidationTarget[], generationID?: string) => {
         if (!revalidator) return Promise.reject(new Error("navigation is not initialized"));
