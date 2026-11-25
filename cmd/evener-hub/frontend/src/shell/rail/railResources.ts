@@ -12,8 +12,20 @@ import {
 import { type ArchivedList, archivedListKey } from "../../stores/archivedList";
 import { selectPinSections, selectRailModel } from "../../stores/navigation/selectors";
 import type { navigationStore } from "../../stores/navigation/store";
+import type { ProjectSessionOrderPref } from "../../stores/prefs";
 import type { RailProject, RailSession } from "./railNodes";
 import type { RailResources } from "./railPending";
+
+// The wire sortKey a project page read names for an order preference. The
+// creation default maps to the empty key every reader used before the
+// preference existed, so only an explicit "lastActivity" opt-in changes what
+// the rail requests and which loaded pages join the render. The union stays
+// this narrow wire vocabulary, never the wider string the resource key type
+// allows (a parked Task 4 finding typed ResourceKey's sortKey as string).
+export type ProjectPageSortKey = "" | "createdAt" | "lastActivity";
+export function projectSessionSortKey(order: ProjectSessionOrderPref): ProjectPageSortKey {
+  return order === "lastActivity" ? "lastActivity" : "";
+}
 
 type CatalogKind = keyof NavigationCatalogs;
 const sessionModelCache = new WeakMap<object, Map<string, RailSession>>();
@@ -109,6 +121,7 @@ const PROJECT_TIERS = ["current", "recent"] as const;
 function projectPageStates(
   pages: ReadonlyMap<string, ResourceState>,
   projectKey: string,
+  sortKey: ProjectPageSortKey,
 ): Array<GraphResource & { key: Extract<ResourceKey, { kind: "project_page" }> }> {
   const tierOrder = { current: 0, recent: 1, archived: 2 } as const;
   return [...pages.values()]
@@ -116,6 +129,7 @@ function projectPageStates(
       (state): state is GraphResource & { key: Extract<ResourceKey, { kind: "project_page" }> } =>
         state.key.kind === "project_page" &&
         state.key.projectKey === projectKey &&
+        (state.key.sortKey ?? "") === sortKey &&
         state.data !== null &&
         isGraphResource(state) &&
         state.normalized.presence !== "gone",
@@ -140,13 +154,25 @@ function sessionCreatedAt(row: RailSession): number | undefined {
   const parsed = stamp ? Date.parse(stamp) : Number.NaN;
   return Number.isNaN(parsed) ? undefined : parsed;
 }
+function sessionLastActivity(row: RailSession): number | undefined {
+  const stamp = row.updated_at ?? row.created_at;
+  const parsed = stamp ? Date.parse(stamp) : Number.NaN;
+  return Number.isNaN(parsed) ? undefined : parsed;
+}
 
-/** Orders a project's joined Current and Recent rows newest-created first,
- * matching the hub's project session comparator. A hub that predates
- * created_at falls back to updated_at. */
-export function compareProjectSessions(a: RailSession, b: RailSession): number {
-  const at = sessionCreatedAt(a);
-  const bt = sessionCreatedAt(b);
+/** Orders a project's joined Current and Recent rows by `mode`. "createdAt"
+ * (the default, and what a two-argument call reads) is today's creation-first
+ * order, created_at with updated_at as fallback, matching the hub's project
+ * session comparator; "lastActivity" orders by updated_at with created_at as
+ * the fallback. Both modes tie-break on title then row_id and place
+ * untimestamped rows as one class at the end. */
+export function compareProjectSessions(
+  a: RailSession,
+  b: RailSession,
+  mode: ProjectSessionOrderPref = "createdAt",
+): number {
+  const at = mode === "lastActivity" ? sessionLastActivity(a) : sessionCreatedAt(a);
+  const bt = mode === "lastActivity" ? sessionLastActivity(b) : sessionCreatedAt(b);
   // Untimestamped rows form one class at the end; two of them keep their
   // input order. Treating a row with one timestamped neighbour as equal to
   // both would make the comparator non-transitive.
@@ -267,10 +293,11 @@ function projectFromGraph(
   summary: NavigationProjectSummary,
   resource: GraphResource,
   pages: ReadonlyMap<string, ResourceState>,
+  order: ProjectSessionOrderPref,
 ): RailProject | null {
   const normalized = resource.normalized;
   if (normalized.presence === "gone") return null;
-  const allPageStates = projectPageStates(pages, summary.key);
+  const allPageStates = projectPageStates(pages, summary.key, projectSessionSortKey(order));
   const pageDependencies = projectPageDependencies(allPageStates);
   const cached = cachedProject(summary, normalized.graph as object, pageDependencies);
   if (cached) return cached;
@@ -312,7 +339,7 @@ function projectFromGraph(
     const metadataRemaining = metadata[`${tier}_remaining`];
     more[tier] = pageRemaining?.remaining ?? (typeof metadataRemaining === "number" ? metadataRemaining : 0);
   }
-  all.sort(compareProjectSessions);
+  all.sort((a, b) => compareProjectSessions(a, b, order));
   return cacheProject(summary, normalized.graph as object, pageDependencies, {
     ...summary,
     loaded: true,
@@ -370,7 +397,11 @@ export function withArchivedLists(
     testRuns: apply(resources.testRuns, "test_runs"),
   };
 }
-function projectsFor(state: ReturnType<typeof navigationStore.getState>, catalog: CatalogKind): RailProject[] {
+function projectsFor(
+  state: ReturnType<typeof navigationStore.getState>,
+  catalog: CatalogKind,
+  order: ProjectSessionOrderPref,
+): RailProject[] {
   const output: RailProject[] = [];
   const catalogResources = [...state.resources.values()]
     .filter(
@@ -397,7 +428,7 @@ function projectsFor(state: ReturnType<typeof navigationStore.getState>, catalog
       if (output.some((project) => project.key === summary.key)) continue;
       const rootState = state.resources.get(keyID({ kind: "project", projectKey: summary.key }));
       const graphProject =
-        rootState && isGraphResource(rootState) ? projectFromGraph(summary, rootState, state.resources) : null;
+        rootState && isGraphResource(rootState) ? projectFromGraph(summary, rootState, state.resources, order) : null;
       if (graphProject) {
         output.push(graphProject);
         continue;
@@ -437,7 +468,10 @@ function catalogOverflowFor(
     limit: pageKey.limit,
   };
 }
-export function railResources(state: ReturnType<typeof navigationStore.getState>): RailResources {
+export function railResources(
+  state: ReturnType<typeof navigationStore.getState>,
+  order: ProjectSessionOrderPref = "createdAt",
+): RailResources {
   const live = loadedSection(state, "live");
   const needsYou = loadedSection(state, "needs_you");
   const pinCatalog = [...state.resources.values()]
@@ -490,9 +524,9 @@ export function railResources(state: ReturnType<typeof navigationStore.getState>
     liveOverflow: { remaining: live.remaining, offset: live.offset, limit: live.limit },
     needsYouOverflow: { remaining: needsYou.remaining, offset: needsYou.offset, limit: needsYou.limit },
     pinSections,
-    projects: projectsFor(state, "projects"),
-    archivedProjects: projectsFor(state, "archived_projects").map(asArchivedProject),
-    testRuns: projectsFor(state, "test_runs"),
+    projects: projectsFor(state, "projects", order),
+    archivedProjects: projectsFor(state, "archived_projects", order).map(asArchivedProject),
+    testRuns: projectsFor(state, "test_runs", order),
     catalogOverflow: {
       projects: catalogOverflowFor(state, "projects"),
       archived_projects: catalogOverflowFor(state, "archived_projects"),
@@ -503,7 +537,8 @@ export function railResources(state: ReturnType<typeof navigationStore.getState>
 export const adaptNavigationResources = (
   state: ReturnType<typeof navigationStore.getState>,
   lists: Readonly<Record<string, ArchivedList>> = {},
-): RailResources => withArchivedLists(railResources(state), lists);
+  order: ProjectSessionOrderPref = "createdAt",
+): RailResources => withArchivedLists(railResources(state, order), lists);
 export function nonEmpty(resources: RailResources): boolean {
   return (
     resources.live.length > 0 ||

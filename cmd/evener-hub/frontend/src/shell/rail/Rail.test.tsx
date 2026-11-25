@@ -115,6 +115,7 @@ function readParamsFor(key: ResourceKey): NavigationReadParams {
         tier: key.tier,
         offset: key.offset,
         limit: key.limit,
+        ...(key.sortKey ? { sortKey: key.sortKey } : {}),
         ...v3,
       };
     case "location":
@@ -3884,5 +3885,117 @@ describe("archived rows come from evener/archived/list", () => {
     fireEvent.click(within(archived).getByText(/1 older/));
     await waitFor(() => expect(seen.some((params) => params.cursor === "cursor-1")).toBe(true));
     await waitFor(() => expect(within(archived).getByText("Old run 2")).toBeTruthy());
+  });
+});
+
+// Settings → Display's "Project session order" preference drives both ends of
+// the rail's project rows: the reads it issues name the pref's sortKey, the
+// join comparator picks its mode, and pages loaded under another key never
+// join the render. One project whose creation and activity orders disagree:
+// the creation-ordered root holds s-newer and s-older, a sorted page holds
+// the old-created s-fresh, and a default-keyed page holds the old s-stale.
+describe("project session order preference", () => {
+  beforeEach(() => {
+    // The suite resets the navigation, connection and workspace stores
+    // globally but not the archived-list store: earlier tests' loaded lists
+    // would otherwise trip this describe's projects into the archived-count
+    // refresh effect, whose async failure lands outside act.
+    resetPrefsStoreForTests();
+    resetArchivedListStoreForTests();
+  });
+
+  const orderCatalog = catalogResource([{ key: "p", name: "Project", session_count: 3 }]);
+  const orderRoot = projectResource("p", [
+    summary({
+      ref: "local:newer",
+      session_id: "newer",
+      title: "s-newer",
+      created_at: "2026-06-01T00:00:00Z",
+      updated_at: "2026-06-01T00:00:00Z",
+    }),
+    summary({
+      ref: "local:older",
+      session_id: "older",
+      title: "s-older",
+      created_at: "2026-01-01T00:00:00Z",
+      updated_at: "2026-01-02T00:00:00Z",
+    }),
+  ]);
+  function orderPage(sortKey: "" | "lastActivity", rows: NavigationSessionSummary[], remaining: number) {
+    return resource(
+      { kind: "project_page", projectKey: "p", tier: "current", offset: 0, limit: 50, ...(sortKey ? { sortKey } : {}) },
+      { generation_id: "g1", revision: 1, sessions: rows, remaining, truncated: remaining > 0 },
+    );
+  }
+  const activityPage = orderPage(
+    "lastActivity",
+    [
+      summary({
+        ref: "local:fresh",
+        session_id: "fresh",
+        title: "s-fresh",
+        created_at: "2025-01-01T00:00:00Z",
+        updated_at: "2026-11-05T00:00:00Z",
+      }),
+    ],
+    3,
+  );
+  const staleDefaultPage = orderPage(
+    "",
+    [
+      summary({
+        ref: "local:stale",
+        session_id: "stale",
+        title: "s-stale",
+        created_at: "2024-12-01T00:00:00Z",
+        updated_at: "2024-12-01T00:00:00Z",
+      }),
+    ],
+    0,
+  );
+
+  function sessionTitles(): string[] {
+    const titles = within(sectionRoot("Projects"))
+      .getAllByTestId("rail-row-title")
+      .map((title) => title.textContent);
+    return titles.filter((title): title is string => /^s-/.test(title ?? ""));
+  }
+
+  test("renders activity-ordered rows and issues reads under the pref's sortKey", () => {
+    prefsStore.setState({ projectSessionOrder: "lastActivity" });
+    installState([orderCatalog, orderRoot, activityPage]);
+    render(<Rail />);
+    fireEvent.click(screen.getByText("Project"));
+    expect(sessionTitles()).toEqual(["s-fresh", "s-newer", "s-older"]);
+    fireEvent.click(screen.getByText("+3 older"));
+    expect(navigationStore.getState().loadProjectPage).toHaveBeenCalledWith("p", "current", 1, 3, "lastActivity");
+  });
+
+  test("toggling the preference re-issues the loaded pages under the new key", async () => {
+    prefsStore.setState({ projectSessionOrder: "lastActivity" });
+    const loadProjectPage = vi.fn();
+    installState([orderCatalog, orderRoot, activityPage]);
+    navigationStore.setState({ loadProjectPage });
+    render(<Rail />);
+    fireEvent.click(screen.getByText("Project"));
+    expect(loadProjectPage).not.toHaveBeenCalled();
+    await act(async () => {
+      prefsStore.getState().setProjectSessionOrder("createdAt");
+    });
+    expect(loadProjectPage).toHaveBeenCalledWith("p", "current", 0, 50);
+  });
+
+  test("a page loaded under another sort key never joins the render", async () => {
+    prefsStore.setState({ projectSessionOrder: "lastActivity" });
+    installState([orderCatalog, orderRoot, activityPage, staleDefaultPage]);
+    render(<Rail />);
+    fireEvent.click(screen.getByText("Project"));
+    expect(sessionTitles()).toEqual(["s-fresh", "s-newer", "s-older"]);
+    // The default-keyed page is already in the store, so its rows appear
+    // with no read at all once the pref selects its key.
+    await act(async () => {
+      prefsStore.getState().setProjectSessionOrder("createdAt");
+    });
+    expect(sessionTitles()).toEqual(["s-newer", "s-older", "s-stale"]);
   });
 });

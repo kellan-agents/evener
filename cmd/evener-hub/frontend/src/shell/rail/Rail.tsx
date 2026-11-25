@@ -87,6 +87,7 @@ import { applyPending, buildPinSourceIndex, type PendingOp } from "./railPending
 import {
   allRailProjects,
   nonEmpty,
+  projectSessionSortKey,
   railResources,
   resourceData,
   resourceState,
@@ -494,6 +495,12 @@ function NavigationRail({
   // read). A hub with no configured hosts keeps today's rail exactly.
   const grouping = usePrefsStore((state) => state.sidebarGrouping);
   const setGrouping = usePrefsStore((state) => state.setSidebarGrouping);
+  // How a project's session rows order (Settings → Display): "createdAt" is
+  // today's creation order, "lastActivity" re-orders by most recent activity.
+  // One subscription drives every consumer below - the join comparator and
+  // page filter in railResources, the sortKey the overflow loads name, and
+  // the reload a change triggers.
+  const projectSessionOrder = usePrefsStore((state) => state.projectSessionOrder);
   const displaySources = useNavigationStore(selectDisplaySources);
   const hostGrouping = displaySources.some((source) => source.id !== LOCAL_HOST);
   const groupingMode: RailGroupingMode = hostGrouping ? grouping : "flat";
@@ -516,8 +523,8 @@ function NavigationRail({
   const state = { ...navigationStore.getState(), resources: resourcesState, expanded };
   const archivedLists = useArchivedLists();
   const navigationBase = useMemo(
-    () => railResources({ ...navigationStore.getState(), resources: resourcesState }),
-    [resourcesState],
+    () => railResources({ ...navigationStore.getState(), resources: resourcesState }, projectSessionOrder),
+    [resourcesState, projectSessionOrder],
   );
   const base = useMemo(() => withArchivedLists(navigationBase, archivedLists), [navigationBase, archivedLists]);
   const resources = useMemo(
@@ -525,6 +532,35 @@ function NavigationRail({
     [base, pending],
   );
   const isExpanded = useMemo(() => overrideLookup(expanded), [expanded]);
+  // A project session order change re-keys the rail's project pages: the
+  // pages already loaded sit under the old sort key and projectPageStates
+  // filters them out of the render, so their rows would stay gone until the
+  // next "+N older" press. Nothing else re-issues them - the rail's loads
+  // are expansion-driven roots (which carry no sort key) and overflow
+  // activations - so reload every project page the store holds under the
+  // new key. Rows stay visible from the project root and re-join as the new
+  // reads land.
+  const reloadedSessionOrder = useRef(projectSessionOrder);
+  useEffect(() => {
+    if (reloadedSessionOrder.current === projectSessionOrder) return;
+    reloadedSessionOrder.current = projectSessionOrder;
+    const sortKey = projectSessionSortKey(projectSessionOrder);
+    for (const resource of navigationStore.getState().resources.values()) {
+      if (resource.key.kind !== "project_page") continue;
+      // Promise.resolve: a test seam may install a loader that resolves
+      // nothing, the same contract useProjectRootLoads wraps its loads with.
+      const reload = navigationStore
+        .getState()
+        .loadProjectPage(
+          resource.key.projectKey,
+          resource.key.tier,
+          resource.key.offset,
+          resource.key.limit,
+          ...(sortKey ? [sortKey] : []),
+        );
+      void Promise.resolve(reload).catch(() => undefined);
+    }
+  }, [projectSessionOrder]);
   useEffect(() => {
     if (navigationMode !== "v3") return;
     if (!manifest)
@@ -660,7 +696,13 @@ function NavigationRail({
       return;
     }
     if (page.projectKey && page.tier) {
-      await navigationStore.getState().loadProjectPage(page.projectKey, page.tier, page.offset, page.limit);
+      // An empty sortKey keeps the read byte-identical to the calls the rail
+      // issued before the preference existed (the store's own
+      // ""-means-absent convention), so only the activity opt-in names a key.
+      const sortKey = projectSessionSortKey(projectSessionOrder);
+      await navigationStore
+        .getState()
+        .loadProjectPage(page.projectKey, page.tier, page.offset, page.limit, ...(sortKey ? [sortKey] : []));
       return;
     }
     if (page.section) {
