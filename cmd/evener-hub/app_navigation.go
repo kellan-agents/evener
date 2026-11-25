@@ -124,7 +124,7 @@ func navigationReadKeyWithFields(params appwire.NavigationReadParams, fields map
 		}
 		return navigationResourceKey{Kind: navigationResourceProject, ProjectKey: params.ProjectKey, Catalog: catalog}, nil
 	case "project_page":
-		if err := rejectNavigationReadFields(params, fields, "projectKey", "tier", "catalog"); err != nil {
+		if err := rejectNavigationReadFields(params, fields, "projectKey", "tier", "catalog", "sortKey"); err != nil {
 			return navigationResourceKey{}, err
 		}
 		if err := validateNavigationIdentity("project key", params.ProjectKey, false); err != nil {
@@ -137,11 +137,14 @@ func navigationReadKeyWithFields(params appwire.NavigationReadParams, fields map
 		if params.Tier != "current" && params.Tier != "recent" && params.Tier != "archived" {
 			return navigationResourceKey{}, fmt.Errorf("invalid project tier %q", params.Tier)
 		}
+		if params.SortKey != "" && params.SortKey != "createdAt" && params.SortKey != "lastActivity" {
+			return navigationResourceKey{}, fmt.Errorf("invalid project sort key %q", params.SortKey)
+		}
 		offset, limit, err := navigationReadPage(params, maxNavigationSectionRows)
 		if err != nil {
 			return navigationResourceKey{}, err
 		}
-		return navigationResourceKey{Kind: navigationResourceProjectPage, ProjectKey: params.ProjectKey, Catalog: catalog, Tier: params.Tier, Offset: offset, Limit: limit}, nil
+		return navigationResourceKey{Kind: navigationResourceProjectPage, ProjectKey: params.ProjectKey, Catalog: catalog, Tier: params.Tier, SortKey: params.SortKey, Offset: offset, Limit: limit}, nil
 	case "location":
 		if err := rejectNavigationReadFields(params, fields, "ref"); err != nil {
 			return navigationResourceKey{}, err
@@ -164,6 +167,7 @@ var navigationReadParamNames = map[string]struct{}{
 	"projectKey":            {},
 	"tier":                  {},
 	"ref":                   {},
+	"sortKey":               {},
 	"offset":                {},
 	"limit":                 {},
 	"etag":                  {},
@@ -208,6 +212,7 @@ func rejectNavigationReadFields(params appwire.NavigationReadParams, fields map[
 		{name: "projectKey", value: params.ProjectKey},
 		{name: "tier", value: params.Tier},
 		{name: "ref", value: params.Ref},
+		{name: "sortKey", value: params.SortKey},
 	}
 	for _, field := range values {
 		fieldPresent := field.value != ""

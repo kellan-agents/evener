@@ -172,6 +172,44 @@ func TestHubNavigationReadPageDefaultsAndCaps(t *testing.T) {
 	}
 }
 
+func TestNavigationReadKeyAcceptsSortKeyOnProjectPage(t *testing.T) {
+	for _, sortKey := range []string{"lastActivity", "createdAt"} {
+		t.Run(sortKey, func(t *testing.T) {
+			raw := fmt.Sprintf(`{"resource":"project_page","projectKey":"p","tier":"current","sortKey":%q,"representationVersion":3}`, sortKey)
+			params, fields, err := decodeNavigationReadParams(json.RawMessage(raw))
+			if err != nil {
+				t.Fatalf("decodeNavigationReadParams: %v", err)
+			}
+			key, err := navigationReadKeyWithFields(params, fields)
+			if err != nil {
+				t.Fatalf("navigationReadKeyWithFields: %v", err)
+			}
+			want := navigationResourceKey{Kind: navigationResourceProjectPage, ProjectKey: "p", Tier: "current", Limit: maxNavigationSectionRows, SortKey: sortKey}
+			if key != want {
+				t.Fatalf("key = %+v, want %+v", key, want)
+			}
+		})
+	}
+}
+
+func TestNavigationReadKeyRejectsSortKeyEverywhereElse(t *testing.T) {
+	service := newNavigationReadTestService(t)
+	server := appserver.NewServer(appserver.ServerConfig{ServerName: "test"})
+	registerNavigationReadHandler(server, service)
+
+	_, err := dispatchNavigationReadRaw(t, server, `{"resource":"catalog","catalog":"projects","sortKey":"lastActivity","representationVersion":3}`)
+	assertNavigationWireError(t, err, appwire.CodeInvalidParams, appwire.ErrorInvalidParams)
+}
+
+func TestNavigationReadKeyRejectsUnknownSortKeyValue(t *testing.T) {
+	service := newNavigationReadTestService(t)
+	server := appserver.NewServer(appserver.ServerConfig{ServerName: "test"})
+	registerNavigationReadHandler(server, service)
+
+	_, err := dispatchNavigationReadRaw(t, server, `{"resource":"project_page","projectKey":"p","tier":"current","sortKey":"activity","representationVersion":3}`)
+	assertNavigationWireError(t, err, appwire.CodeInvalidParams, appwire.ErrorInvalidParams)
+}
+
 func TestHubNavigationReadNormalizesPagingAndRejectsInvalidCombinations(t *testing.T) {
 	service := newNavigationReadTestService(t)
 	server := appserver.NewServer(appserver.ServerConfig{ServerName: "test"})

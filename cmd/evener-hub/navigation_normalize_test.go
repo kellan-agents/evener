@@ -191,11 +191,34 @@ func TestNavigationViewScopeParityVectors(t *testing.T) {
 			key:  navigationResourceKey{Kind: navigationResourceProjectPage, ProjectKey: "no-project", Catalog: navigationResourceArchivedProjects, Tier: "current", Offset: 1, Limit: 2},
 			want: "nav3/project_page///bm8tcHJvamVjdA/Y3VycmVudA/1/2/catalog/archived_projects",
 		},
+		{
+			key:  navigationResourceKey{Kind: navigationResourceProjectPage, ProjectKey: "project", Tier: "current", SortKey: "lastActivity"},
+			want: "nav3/project_page///cHJvamVjdA/Y3VycmVudA/0/50/sort/lastActivity",
+		},
+		{
+			key:  navigationResourceKey{Kind: navigationResourceProjectPage, ProjectKey: "no-project", Catalog: navigationResourceTestRuns, Tier: "current", Offset: 1, Limit: 2, SortKey: "lastActivity"},
+			want: "nav3/project_page///bm8tcHJvamVjdA/Y3VycmVudA/1/2/catalog/test_runs/sort/lastActivity",
+		},
 	}
 	for _, test := range tests {
 		if got := navigationViewScope(test.key); got != test.want {
 			t.Errorf("navigationViewScope(%+v) = %q, want %q", test.key, got, test.want)
 		}
+	}
+}
+
+func TestNavigationProjectPageSortKeyDistinguishesResourceIdentity(t *testing.T) {
+	defaultOrder := navigationResourceKey{Kind: navigationResourceProjectPage, ProjectKey: "p", Tier: "current", Limit: maxNavigationSectionRows}
+	byActivity := defaultOrder
+	byActivity.SortKey = "lastActivity"
+	if defaultOrder.View() == byActivity.View() {
+		t.Fatalf("project page views match across sort keys: %+v", defaultOrder.View())
+	}
+	if defaultOrder.View().String() == byActivity.View().String() {
+		t.Fatalf("project page identities match across sort keys: %s", defaultOrder.View().String())
+	}
+	if navigationETag(defaultOrder, "generation", 1) == navigationETag(byActivity, "generation", 1) {
+		t.Fatalf("project page etags match across sort keys: %s", navigationETag(defaultOrder, "generation", 1))
 	}
 }
 

@@ -74,8 +74,11 @@ type navigationResourceKey struct {
 	ProjectKey string
 	// Catalog narrows a project or project page read to one catalog's
 	// project; empty reads the first catalog holding the key.
-	Catalog    navigationResourceKind
-	Tier       string
+	Catalog navigationResourceKind
+	Tier    string
+	// SortKey is a project page read's row order: "", "createdAt" or
+	// "lastActivity".
+	SortKey    string
 	Offset     uint32
 	Limit      uint32
 	Generation string
@@ -914,20 +917,23 @@ func (p navigationProjection) ProjectIn(catalog navigationResourceKind, key stri
 		return hubapi.NavigationProjectResource{}, false
 	}
 	projector := navigationProjector{projection: p}
-	current, currentRemaining := projector.projectTier(project, "current", 0, maxNavigationSectionRows)
-	recent, recentRemaining := projector.projectTier(project, "recent", 0, maxNavigationSectionRows)
+	current, currentRemaining := projector.projectTier(project, "current", 0, maxNavigationSectionRows, "")
+	recent, recentRemaining := projector.projectTier(project, "recent", 0, maxNavigationSectionRows, "")
 	resource := hubapi.NavigationProjectResource{GenerationID: p.inputs.GenerationID, Revision: p.inputs.Revision, Key: key, Current: hubapi.NavigationTier{Sessions: current, Remaining: currentRemaining}, Recent: hubapi.NavigationTier{Sessions: recent, Remaining: recentRemaining}, Archived: hubapi.NavigationTier{Sessions: hubapi.NavigationArray[hubapi.NavigationSessionSummary]{}}, Truncated: projector.truncated}
 	fitNavigationProject(&resource)
 	return resource, true
 }
 
 func (p navigationProjection) ProjectPage(key, tier string, offset uint32, limit int) (hubapi.NavigationProjectPage, error) {
-	return p.ProjectPageIn("", key, tier, offset, limit)
+	return p.ProjectPageIn("", key, tier, offset, limit, "")
 }
 
 // ProjectPageIn is one tier page of key's project in catalog, or in the
-// first catalog holding it when catalog is empty.
-func (p navigationProjection) ProjectPageIn(catalog navigationResourceKind, key, tier string, offset uint32, limit int) (hubapi.NavigationProjectPage, error) {
+// first catalog holding it when catalog is empty. sortKey names the row
+// order: "" and "createdAt" keep the default creation order, and
+// "lastActivity" orders by the row's last activity with created_at as
+// fallback.
+func (p navigationProjection) ProjectPageIn(catalog navigationResourceKind, key, tier string, offset uint32, limit int, sortKey string) (hubapi.NavigationProjectPage, error) {
 	project, ok := p.projectIn(catalog, key)
 	if !ok {
 		return hubapi.NavigationProjectPage{}, fmt.Errorf("navigation project %q not found", key)
@@ -941,7 +947,7 @@ func (p navigationProjection) ProjectPageIn(catalog navigationResourceKind, key,
 		return hubapi.NavigationProjectPage{GenerationID: p.inputs.GenerationID, Revision: p.inputs.Revision, Key: key, Tier: tier, Offset: offset, Sessions: hubapi.NavigationArray[hubapi.NavigationSessionSummary]{}}, nil
 	}
 	projector := navigationProjector{projection: p}
-	sessions, remaining := projector.projectTier(project, tier, offset, limit)
+	sessions, remaining := projector.projectTier(project, tier, offset, limit, sortKey)
 	resource := hubapi.NavigationProjectPage{GenerationID: p.inputs.GenerationID, Revision: p.inputs.Revision, Key: key, Tier: tier, Offset: offset, Sessions: sessions, Remaining: remaining, Truncated: projector.truncated}
 	fitNavigationProjectPage(&resource)
 	return resource, nil
@@ -1330,7 +1336,7 @@ func (p navigationProjection) Resource(key navigationResourceKey) (any, navigati
 			err = fmt.Errorf("navigation project %q not found", key.ProjectKey)
 		}
 	case navigationResourceProjectPage:
-		resource, err = p.ProjectPageIn(key.Catalog, key.ProjectKey, key.Tier, key.Offset, int(key.Limit))
+		resource, err = p.ProjectPageIn(key.Catalog, key.ProjectKey, key.Tier, key.Offset, int(key.Limit), key.SortKey)
 	case navigationResourceLocation:
 		var ok bool
 		resource, ok = p.Location(key.ID)
@@ -1579,7 +1585,10 @@ func (p *navigationProjector) projectNodes(rows []hubcore.TreeNode, limit int) h
 	return out
 }
 
-func (p *navigationProjector) projectTier(project hubcore.TreeProject, tier string, offset uint32, limit int) (hubapi.NavigationArray[hubapi.NavigationSessionSummary], int) {
+// projectTier projects one tier page of project. sortKey names the row
+// order, threaded from a project page read; the order it names is not
+// implemented yet, so every value reads the same creation-ordered rows.
+func (p *navigationProjector) projectTier(project hubcore.TreeProject, tier string, offset uint32, limit int, sortKey string) (hubapi.NavigationArray[hubapi.NavigationSessionSummary], int) {
 	rows, ok := project.TierRows(tier)
 	if !ok {
 		return hubapi.NavigationArray[hubapi.NavigationSessionSummary]{}, 0

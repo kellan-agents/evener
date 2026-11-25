@@ -299,11 +299,11 @@ func TestNavigationResourceReadsRefuseUnknownSelectors(t *testing.T) {
 			return err
 		},
 		"unknown project page key": func() error {
-			_, err := projection.ProjectPageIn("", "missing", "current", 0, maxNavigationSectionRows)
+			_, err := projection.ProjectPageIn("", "missing", "current", 0, maxNavigationSectionRows, "")
 			return err
 		},
 		"unknown project page tier": func() error {
-			_, err := projection.ProjectPageIn("", "project", "bogus", 0, maxNavigationSectionRows)
+			_, err := projection.ProjectPageIn("", "project", "bogus", 0, maxNavigationSectionRows, "")
 			return err
 		},
 	} {
@@ -518,7 +518,7 @@ func TestNavigationProjectorCapsRowsAndUnknownTiers(t *testing.T) {
 	if len(served) != 2 || !projector.truncated {
 		t.Fatalf("rows=%d truncated=%v, want 2 rows and the truncation mark", len(served), projector.truncated)
 	}
-	empty, remaining := projector.projectTier(hubcore.TreeProject{Key: "project", Current: rows}, "bogus", 0, maxNavigationSectionRows)
+	empty, remaining := projector.projectTier(hubcore.TreeProject{Key: "project", Current: rows}, "bogus", 0, maxNavigationSectionRows, "")
 	if len(empty) != 0 || remaining != 0 {
 		t.Fatalf("unknown tier served %d rows with %d remaining, want an empty page", len(empty), remaining)
 	}

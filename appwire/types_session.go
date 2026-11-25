@@ -52,13 +52,18 @@ type NavigationReadParams struct {
 	// read it narrows the read to that catalog's project, as a location's
 	// catalog names it; an older hub refuses it there, and sends no location
 	// catalog to take it from.
-	Catalog    string              `json:"catalog,omitempty"`
-	ProjectKey string              `json:"projectKey,omitempty"`
-	Tier       string              `json:"tier,omitempty"`
-	Ref        string              `json:"ref,omitempty"`
-	Offset     *uint32             `json:"offset,omitempty"`
-	Limit      *uint32             `json:"limit,omitempty"`
-	Base       *NavigationReadBase `json:"base,omitempty"`
+	Catalog    string `json:"catalog,omitempty"`
+	ProjectKey string `json:"projectKey,omitempty"`
+	Tier       string `json:"tier,omitempty"`
+	Ref        string `json:"ref,omitempty"`
+	// SortKey names how a project_page read orders its rows: "createdAt"
+	// (the default when it is absent) or "lastActivity", which orders by the
+	// row's last activity with created_at as fallback. Only a project_page
+	// read accepts it.
+	SortKey string              `json:"sortKey,omitempty"`
+	Offset  *uint32             `json:"offset,omitempty"`
+	Limit   *uint32             `json:"limit,omitempty"`
+	Base    *NavigationReadBase `json:"base,omitempty"`
 }
 
 func (params *NavigationReadParams) UnmarshalJSON(data []byte) error {

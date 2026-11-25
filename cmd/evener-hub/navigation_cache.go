@@ -48,6 +48,7 @@ func (key navigationResourceKey) canonical() navigationResourceKey {
 		canonical.ProjectKey = key.ProjectKey
 		canonical.Catalog = key.Catalog
 		canonical.Tier = key.Tier
+		canonical.SortKey = key.SortKey
 		canonical.Offset = key.Offset
 		canonical.Limit = canonicalNavigationLimit(key.Limit, maxNavigationSectionRows)
 	case navigationResourceLocation:
@@ -84,6 +85,11 @@ func navigationViewScope(key navigationResourceKey) string {
 	// keeps the scope it always had.
 	if view.Catalog != "" {
 		scope += "/catalog/" + string(view.Catalog)
+	}
+	// Only a project page read that names a sort key carries it, so every
+	// other view keeps the scope it always had.
+	if view.SortKey != "" {
+		scope += "/sort/" + view.SortKey
 	}
 	return scope
 }
@@ -133,13 +139,14 @@ func (key navigationResourceKey) String() string {
 		ProjectKey string                 `json:"project_key,omitempty"`
 		Catalog    navigationResourceKind `json:"catalog,omitempty"`
 		Tier       string                 `json:"tier,omitempty"`
+		SortKey    string                 `json:"sort_key,omitempty"`
 		Offset     uint32                 `json:"offset,omitempty"`
 		Limit      uint32                 `json:"limit,omitempty"`
 		Generation string                 `json:"generation"`
 		Revision   uint64                 `json:"revision"`
 	}{
 		Kind: key.Kind, ID: key.ID, SectionID: key.SectionID,
-		ProjectKey: key.ProjectKey, Catalog: key.Catalog, Tier: key.Tier, Offset: key.Offset,
+		ProjectKey: key.ProjectKey, Catalog: key.Catalog, Tier: key.Tier, SortKey: key.SortKey, Offset: key.Offset,
 		Limit: key.Limit, Generation: key.Generation, Revision: key.Revision,
 	}
 	encoded, _ := json.Marshal(identity)
