@@ -43,3 +43,22 @@ test("toggling Enter sends persists to the pinned key and toasts Settings saved"
   expect(localStorage.getItem("evener.prefs.enterToSend")).toBe("1");
   await waitFor(() => expect(toastKinds()).toEqual(["success"]));
 });
+
+test("renders a Project session order row with the two options, Creation time checked by default", () => {
+  renderWithToasts();
+
+  expect(screen.getByRole("radiogroup", { name: "Project session order" })).toBeTruthy();
+  expect(screen.getByRole("radio", { name: "Creation time" }).getAttribute("aria-checked")).toBe("true");
+  expect(screen.getByRole("radio", { name: "Last activity" }).getAttribute("aria-checked")).toBe("false");
+});
+
+test("choosing Last activity persists setProjectSessionOrder('lastActivity') and toasts Settings saved", async () => {
+  const user = userEvent.setup();
+  renderWithToasts();
+
+  await user.click(screen.getByRole("radio", { name: "Last activity" }));
+
+  expect(prefsStore.getState().projectSessionOrder).toBe("lastActivity");
+  expect(localStorage.getItem("evener.prefs.projectSessionOrder")).toBe("lastActivity");
+  await waitFor(() => expect(toastKinds()).toEqual(["success"]));
+});

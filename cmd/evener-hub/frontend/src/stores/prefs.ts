@@ -96,6 +96,14 @@ export type NotificationsLoudScopePref = "asks" | "all";
 // branches - because the grouping is the feature, not something the
 // control must unlock first.
 export type SidebarGroupingPref = "host-project" | "project-host";
+// How a project page orders its sessions (Settings -> Display's "Project
+// session order" row): "createdAt" is today's creation order, "lastActivity"
+// re-orders by most recent activity. Persisted browser-local here and read
+// back as the client library's sortKey (the hub-side plumbing Tasks 1-4
+// landed), so readEnum's fallback matters beyond cosmetics: a corrupted
+// stored value must decode to "createdAt", never reach a read as a garbage
+// sortKey.
+export type ProjectSessionOrderPref = "createdAt" | "lastActivity";
 
 export interface PrefsStoreState {
   theme: ThemePref;
@@ -103,6 +111,7 @@ export interface PrefsStoreState {
   sidebarHidden: boolean;
   sidebarWidth: number;
   sidebarGrouping: SidebarGroupingPref;
+  projectSessionOrder: ProjectSessionOrderPref;
   fontSize: FontSizePref;
   transcriptMeasure: TranscriptMeasurePref;
   // Composer prefs (Display section, parity-m7-settings.md §5). Field names
@@ -136,6 +145,7 @@ export interface PrefsStoreState {
   setSidebarHidden(value: boolean): void;
   setSidebarWidth(value: number): void;
   setSidebarGrouping(value: SidebarGroupingPref): void;
+  setProjectSessionOrder(value: ProjectSessionOrderPref): void;
   setFontSize(value: FontSizePref): void;
   setTranscriptMeasure(value: TranscriptMeasurePref): void;
   setEnterToSend(value: boolean): void;
@@ -341,6 +351,7 @@ const FONT_SIZE_VALUES: readonly FontSizePref[] = ["s", "m", "l", "xl"];
 const TRANSCRIPT_MEASURE_VALUES: readonly TranscriptMeasurePref[] = ["reading", "wide"];
 const LOUD_SCOPE_VALUES: readonly NotificationsLoudScopePref[] = ["asks", "all"];
 const SIDEBAR_GROUPING_VALUES: readonly SidebarGroupingPref[] = ["host-project", "project-host"];
+const PROJECT_SESSION_ORDER_VALUES: readonly ProjectSessionOrderPref[] = ["createdAt", "lastActivity"];
 
 // Per-field localStorage key names for the grouped notifications record -
 // exposed as a small in-memory record for a convenient single destructure at
@@ -486,6 +497,7 @@ function loadInitialState(): Omit<
   | "setSidebarHidden"
   | "setSidebarWidth"
   | "setSidebarGrouping"
+  | "setProjectSessionOrder"
   | "setFontSize"
   | "setTranscriptMeasure"
   | "setEnterToSend"
@@ -509,6 +521,7 @@ function loadInitialState(): Omit<
     sidebarHidden: readBool("sidebarHidden", false),
     sidebarWidth: readNumber("sidebarWidth", SIDEBAR_WIDTH_DEFAULT, clampSidebarWidth),
     sidebarGrouping: readEnum("sidebarGrouping", SIDEBAR_GROUPING_VALUES, "project-host"),
+    projectSessionOrder: readEnum("projectSessionOrder", PROJECT_SESSION_ORDER_VALUES, "createdAt"),
     fontSize,
     transcriptMeasure,
     enterToSend: readBool("enterToSend", false),
@@ -557,6 +570,11 @@ export const prefsStore = createStore<PrefsStoreState>((set) => ({
   setSidebarGrouping(value) {
     writeRaw("sidebarGrouping", value);
     set({ sidebarGrouping: value });
+  },
+
+  setProjectSessionOrder(value) {
+    writeRaw("projectSessionOrder", value);
+    set({ projectSessionOrder: value });
   },
 
   setFontSize(value) {

@@ -421,6 +421,36 @@ describe("sidebarGrouping", () => {
   });
 });
 
+// projectSessionOrder: how a project page orders its sessions - "createdAt"
+// (oldest-first creation order, today's shape) or "lastActivity". Persisted
+// browser-local here; the hub read is keyed by it (Tasks 1-4's sortKey
+// plumbing), so an unrecognized stored value must fall back to "createdAt"
+// (readEnum's own corrupted-value contract) rather than ever reaching the
+// client library as a garbage sortKey.
+describe("projectSessionOrder", () => {
+  test("defaults to createdAt with nothing persisted", () => {
+    expect(prefsStore.getState().projectSessionOrder).toBe("createdAt");
+  });
+
+  test("setProjectSessionOrder persists the raw value and updates state", () => {
+    prefsStore.getState().setProjectSessionOrder("lastActivity");
+    expect(localStorage.getItem(KEY("projectSessionOrder"))).toBe("lastActivity");
+    expect(prefsStore.getState().projectSessionOrder).toBe("lastActivity");
+  });
+
+  test("round-trips a persisted order across a fresh load", () => {
+    prefsStore.getState().setProjectSessionOrder("lastActivity");
+    resetPrefsStoreForTests();
+    expect(prefsStore.getState().projectSessionOrder).toBe("lastActivity");
+  });
+
+  test("a corrupted stored value falls back to createdAt", () => {
+    localStorage.setItem(KEY("projectSessionOrder"), "bogus");
+    resetPrefsStoreForTests();
+    expect(prefsStore.getState().projectSessionOrder).toBe("createdAt");
+  });
+});
+
 // The docked rail's dragged width. Unlike every other pref here it carries
 // real bounds, and a value outside them would render an unusable (or
 // unrecoverable) sidebar - so the clamp is asserted on BOTH the read and the
