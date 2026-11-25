@@ -1302,6 +1302,39 @@ test("project pages with different sort keys read separately and share no cache 
   expect(store.getState().resources.get(sortedID)).toBe(sortedPage);
 });
 
+// selectProjectPage is the read side of loadProjectPage's sort key: the
+// selector must construct the same keyID the loader stored under, or a
+// that name no sort key - or name "" - keep the default order's entry, the
+// one every existing caller already reads.
+test("selectProjectPage reads back a sorted page only under its own sort key", async () => {
+  const row = (ref: string) => completeSession({ ref, title: ref, project: "p", live: true });
+  await init((params) => {
+    if (params.resource === "manifest") return wireSnapshot(params, emptyManifest());
+    const sorted = params.sortKey === "lastActivity";
+    return wireSnapshot(params, {
+      sessions: [row(sorted ? "sorted-1" : "default-1")],
+      remaining: 0,
+      truncated: false,
+    });
+  });
+  await store.getState().loadProjectPage("p", "current", 0, 50, "lastActivity");
+
+  const sortedPage = selectProjectPage("p", "current", 0, 50, "lastActivity")(store.getState());
+  expect((sortedPage?.data as { sessions: Array<{ ref: string }> } | null)?.sessions.map((item) => item.ref)).toEqual([
+    "sorted-1",
+  ]);
+  expect(selectProjectPage("p", "current")(store.getState())).toBeUndefined();
+  expect(selectProjectPage("p", "current", 0, 50, "")(store.getState())).toBeUndefined();
+
+  await store.getState().loadProjectPage("p", "current", 0, 50);
+  const defaultPage = selectProjectPage("p", "current")(store.getState());
+  expect((defaultPage?.data as { sessions: Array<{ ref: string }> } | null)?.sessions.map((item) => item.ref)).toEqual([
+    "default-1",
+  ]);
+  expect(selectProjectPage("p", "current", 0, 50, "")(store.getState())).toBe(defaultPage);
+  expect(selectProjectPage("p", "current", 0, 50, "lastActivity")(store.getState())).toBe(sortedPage);
+});
+
 test("notification fencing rejects duplicate, wrong generation, and gaps while locations stay retained", async () => {
   const client = new FakeClient("ready");
   client.on("evener/navigation/read", (params) =>

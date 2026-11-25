@@ -87,9 +87,15 @@ const selectResource = (key: ResourceKey) => {
 export const selectProjectResource = (projectKey: string) => (s: NavigationStoreState) =>
   s.resources.get(keyID({ kind: "project", projectKey }));
 export const selectProjectPage =
-  (projectKey: string, tier: "current" | "recent" | "archived", offset = 0, limit = 50) =>
+  (
+    projectKey: string,
+    tier: "current" | "recent" | "archived",
+    offset = 0,
+    limit = 50,
+    sortKey: "" | "createdAt" | "lastActivity" = "",
+  ) =>
   (s: NavigationStoreState) =>
-    s.resources.get(keyID({ kind: "project_page", projectKey, tier, offset, limit }));
+    s.resources.get(keyID({ kind: "project_page", projectKey, tier, offset, limit, ...(sortKey ? { sortKey } : {}) }));
 export const selectLocation = (ref: string) => selectResource({ kind: "location", ref });
 function selectSectionRows(section: "live" | "needs_you", state: NavigationStoreState): NavigationSessionSummary[] {
   return loadedSectionRows(state, (key) => key.kind === "section" && key.section === section);
