@@ -1321,3 +1321,62 @@ func TestNavigationMergeProjectKeepsFirstGroupArchivedFlag(t *testing.T) {
 		t.Errorf("merged test-run row IsArchived = true, want the first group's false flag")
 	}
 }
+
+// A project_page read naming sortKey "lastActivity" serves the tier's rows
+// newest activity first, and only on its own page: the shared tier rows keep
+// the default creation order for every other reader, including a default read
+// on the same projection right after an activity read.
+func TestNavigationProjectPageLastActivitySortsRowsWithoutMutatingSharedTier(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0).UTC()
+	row := func(id string, createdAgo, updatedAgo time.Duration) hubcore.TreeNode {
+		return hubcore.TreeNode{ID: id, Ref: "local:" + id, Title: id, Project: "activity", Kind: "session", State: "idle",
+			CreatedAt: now.Add(-createdAgo), UpdatedAt: now.Add(-updatedAgo)}
+	}
+	// Creation order ≠ activity order: the newest-created row is the
+	// stalest, and the oldest-created row was just touched.
+	tree := hubcore.Tree{
+		Projects: []hubcore.TreeProject{{
+			Key: "activity", Name: "activity",
+			// The tree hands the projection rows already creation-ordered
+			// (hubcore's contract); the fixture lists them newest-created
+			// first.
+			Current: []hubcore.TreeNode{
+				row("new-created-stale", time.Hour, 3*time.Hour),
+				row("mid-both", 2*time.Hour, time.Hour),
+				row("old-created-busy", 3*time.Hour, 0),
+			},
+		}},
+	}
+	projection, err := buildNavigationProjection(navigationBuildInputs{GenerationID: "00112233445566778899aabbccddeeff", Revision: 1, Tree: tree})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ids := func(page hubapi.NavigationProjectPage) []string {
+		got := make([]string, 0, len(page.Sessions))
+		for _, session := range page.Sessions {
+			got = append(got, session.SessionID)
+		}
+		return got
+	}
+	activityPage, err := projection.ProjectPageIn("", "activity", "current", 0, 50, "lastActivity")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"old-created-busy", "mid-both", "new-created-stale"}; !reflect.DeepEqual(ids(activityPage), want) {
+		t.Fatalf("lastActivity page = %v, want %v (newest activity first)", ids(activityPage), want)
+	}
+	defaultPage, err := projection.ProjectPageIn("", "activity", "current", 0, 50, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"new-created-stale", "mid-both", "old-created-busy"}; !reflect.DeepEqual(ids(defaultPage), want) {
+		t.Fatalf("default page = %v, want %v (newest creation first)", ids(defaultPage), want)
+	}
+	again, err := projection.ProjectPageIn("", "activity", "current", 0, 50, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"new-created-stale", "mid-both", "old-created-busy"}; !reflect.DeepEqual(ids(again), want) {
+		t.Fatalf("default page after a lastActivity read = %v, want %v (the shared rows must keep creation order)", ids(again), want)
+	}
+}

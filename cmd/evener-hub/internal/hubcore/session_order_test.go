@@ -1,6 +1,8 @@
 package hubcore
 
 import (
+	"sort"
+	"strings"
 	"testing"
 	"time"
 
@@ -118,5 +120,60 @@ func fuzzScenarioLiveEntryOrderKeyFallbackID(t *testing.T) {
 	le = LiveEntry{Address: "addr"}
 	if got := liveEntryFallbackOrderKey(le); got.ID != "addr" {
 		t.Fatalf("id=%q, want Address as last resort", got.ID)
+	}
+}
+
+// orderIDs sorts a copy of keys with less and joins the sorted IDs, so a
+// comparator test asserts the order a real sort produces, not one pair at a
+// time.
+func orderIDs(keys []SessionOrderKey, less func(a, b SessionOrderKey) bool) string {
+	sorted := append([]SessionOrderKey(nil), keys...)
+	sort.SliceStable(sorted, func(i, j int) bool { return less(sorted[i], sorted[j]) })
+	ids := make([]string, 0, len(sorted))
+	for _, key := range sorted {
+		ids = append(ids, key.ID)
+	}
+	return strings.Join(ids, ",")
+}
+
+// The same four-row shape as
+// fuzzScenarioBuildTree_OrdersProjectSessionsByCreatedTitleAndID, as bare
+// order keys: creation order and activity order disagree, so one comparator
+// cannot satisfy both halves of this test.
+func TestProjectSessionOrderLessByActivityOrdersByUpdateThenTitleAndID(t *testing.T) {
+	updated := time.Date(2026, 5, 11, 12, 0, 0, 0, time.UTC)
+	keys := []SessionOrderKey{
+		{ID: "02wMz5Txv2enqVTitaig6F", Created: updated.Add(-2 * time.Hour), Updated: updated, Title: "beta task"},
+		{ID: "02wMz5Txv1C3Hut0M8GCeB", Created: updated.Add(-time.Hour), Updated: updated, Title: "alpha task"},
+		{ID: "02wMz5Txv47YP64RR3B9YJ", Created: updated.Add(-3 * time.Hour), Updated: updated, Title: "bravo task"},
+		{ID: "02wMz5Txv5aIxgf9yVdd0N", Created: updated.Add(-3 * time.Hour), Updated: updated.Add(-time.Hour), Title: "alpha task"},
+	}
+
+	// Activity-desc: the three rows sharing the update instant order by
+	// title, and the oldest-activity row is last even though it ties the
+	// oldest creation.
+	wantActivity := "02wMz5Txv1C3Hut0M8GCeB,02wMz5Txv2enqVTitaig6F,02wMz5Txv47YP64RR3B9YJ,02wMz5Txv5aIxgf9yVdd0N"
+	if got := orderIDs(keys, ProjectSessionOrderLessByActivity); got != wantActivity {
+		t.Fatalf("activity order = %s, want %s (newest activity first, then title)", got, wantActivity)
+	}
+	// Guard the default: the same keys keep creation order, whose tail the
+	// activity order cannot produce.
+	wantCreation := "02wMz5Txv1C3Hut0M8GCeB,02wMz5Txv2enqVTitaig6F,02wMz5Txv5aIxgf9yVdd0N,02wMz5Txv47YP64RR3B9YJ"
+	if got := orderIDs(keys, ProjectSessionOrderLess); got != wantCreation {
+		t.Fatalf("creation order = %s, want %s (newest creation first, unchanged)", got, wantCreation)
+	}
+
+	// A shared update instant and title leave the ID to break the tie, and
+	// the ID tiebreak opposes the creation order, so only a comparator that
+	// consults the ID can produce the activity order.
+	tie := []SessionOrderKey{
+		{ID: "02wMz5TxvB", Created: updated.Add(-time.Hour), Updated: updated, Title: "alpha task"},
+		{ID: "02wMz5TxvA", Created: updated.Add(-2 * time.Hour), Updated: updated, Title: "alpha task"},
+	}
+	if got, want := orderIDs(tie, ProjectSessionOrderLessByActivity), "02wMz5TxvA,02wMz5TxvB"; got != want {
+		t.Fatalf("activity tie order = %s, want %s (the ID breaks the tie)", got, want)
+	}
+	if got, want := orderIDs(tie, ProjectSessionOrderLess), "02wMz5TxvB,02wMz5TxvA"; got != want {
+		t.Fatalf("creation tie order = %s, want %s (newest creation first, unchanged)", got, want)
 	}
 }

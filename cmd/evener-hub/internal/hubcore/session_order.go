@@ -47,6 +47,24 @@ func ProjectSessionOrderLess(a, b SessionOrderKey) bool {
 	return compareOrderText(a.ID, b.ID) < 0
 }
 
+// ProjectSessionOrderLessByActivity reports whether a sorts before b in the
+// opt-in order for project_page reads that name sortKey "lastActivity": newest
+// activity (OrderUpdatedAt) first, then title, then ID. The default
+// comparator's row-stability ruling is untouched: ProjectSessionOrderLess
+// still orders project rows by creation, so a session keeps its row unless a
+// read asks to see the touched ones first.
+func ProjectSessionOrderLessByActivity(a, b SessionOrderKey) bool {
+	au := OrderUpdatedAt(a.Updated, a.Created)
+	bu := OrderUpdatedAt(b.Updated, b.Created)
+	if !au.Equal(bu) {
+		return au.After(bu)
+	}
+	if cmp := compareOrderText(a.Title, b.Title); cmp != 0 {
+		return cmp < 0
+	}
+	return compareOrderText(a.ID, b.ID) < 0
+}
+
 func OrderUpdatedAt(updated, created time.Time) time.Time {
 	if !updated.IsZero() {
 		return updated
@@ -218,4 +236,11 @@ func TreeNodeLess(a, b TreeNode) bool {
 // session list.
 func ProjectTreeNodeLess(a, b TreeNode) bool {
 	return ProjectSessionOrderLess(TreeNodeOrderKey(a), TreeNodeOrderKey(b))
+}
+
+// TreeNodeOrderLessByActivity mirrors TreeNodeLess with the activity
+// comparator: the opt-in order for project_page reads that name sortKey
+// "lastActivity".
+func TreeNodeOrderLessByActivity(a, b TreeNode) bool {
+	return ProjectSessionOrderLessByActivity(TreeNodeOrderKey(a), TreeNodeOrderKey(b))
 }

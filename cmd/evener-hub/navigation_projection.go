@@ -1586,12 +1586,20 @@ func (p *navigationProjector) projectNodes(rows []hubcore.TreeNode, limit int) h
 }
 
 // projectTier projects one tier page of project. sortKey names the row
-// order, threaded from a project page read; the order it names is not
-// implemented yet, so every value reads the same creation-ordered rows.
+// order a project page read asked for: "lastActivity" copies the project's
+// authoritative rows and sorts the copy newest activity first, so the shared
+// rows every other reader pages through keep the default creation order;
+// the default reads them as hubcore ordered them, untouched.
 func (p *navigationProjector) projectTier(project hubcore.TreeProject, tier string, offset uint32, limit int, sortKey string) (hubapi.NavigationArray[hubapi.NavigationSessionSummary], int) {
 	rows, ok := project.TierRows(tier)
 	if !ok {
 		return hubapi.NavigationArray[hubapi.NavigationSessionSummary]{}, 0
+	}
+	if sortKey == "lastActivity" {
+		rows = append([]hubcore.TreeNode(nil), rows...)
+		sort.SliceStable(rows, func(i, j int) bool {
+			return hubcore.TreeNodeOrderLessByActivity(rows[i], rows[j])
+		})
 	}
 	page, sourceRemaining := navigationPage(rows, offset, limit, maxNavigationSectionRows)
 	sessions := p.projectNodes(page, maxNavigationSectionRows)
