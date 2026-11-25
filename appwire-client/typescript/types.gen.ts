@@ -2865,6 +2865,13 @@ export interface NavigationReadParams {
   projectKey?: string;
   tier?: string;
   ref?: string;
+  /**
+   * SortKey names how a project_page read orders its rows: "createdAt"
+   * (the default when it is absent) or "lastActivity", which orders by the
+   * row's last activity with created_at as fallback. Only a project_page
+   * read accepts it.
+   */
+  sortKey?: string;
   offset?: number;
   limit?: number;
   base?: NavigationReadBase;

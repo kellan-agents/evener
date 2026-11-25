@@ -258,7 +258,7 @@ no router (reserved).
 | `evener/devicePairing/read` | hub | [DevicePairingParams](#devicepairingparams) | [DevicePairingStatus](#devicepairingstatus) | Lists pending device claims for explicit comparison. |
 | `evener/devicePairing/approve` | hub | [DevicePairingApproveParams](#devicepairingapproveparams) | [DevicePairingStatus](#devicepairingstatus) | Approves one device key for encrypted credential delivery. |
 | `evener/devicePairing/cancel` | hub | [DevicePairingParams](#devicepairingparams) | [DevicePairingStatus](#devicepairingstatus) | Revokes a device pairing invitation. |
-| `evener/navigation/read` | hub | [NavigationReadParams](#navigationreadparams) | [NavigationReadResponse](#navigationreadresponse) | Reads one bounded, revisioned hub navigation resource as a normalized v3 snapshot or delta, optionally conditional on its exact base. |
+| `evener/navigation/read` | hub | [NavigationReadParams](#navigationreadparams) | [NavigationReadResponse](#navigationreadresponse) | Reads one bounded, revisioned hub navigation resource as a normalized v3 snapshot or delta, optionally conditional on its exact base. A project_page read may also name sortKey, createdAt (the default) or lastActivity, which orders the page's rows by their last activity with created_at as fallback; every other resource refuses it. |
 | `evener/favorite/set` | hub | [FavoriteSetParams](#favoritesetparams) | [FavoriteSetResponse](#favoritesetresponse) | Sets or clears a project favorite and returns the committed navigation invalidation targets. |
 | `evener/archive/set` | hub | [ArchiveParams](#archiveparams) | [ArchiveResponse](#archiveresponse) | Sets or clears an explicit project or session archive decision and returns its committed navigation receipt, or marks that receipt deferred when the decision persisted but its refresh deadline expired. |
 | `evener/project/delete` | hub | [ProjectDeleteParams](#projectdeleteparams) | [ProjectDeleteResponse](#projectdeleteresponse) | Deletes every removable session in one path-validated local project and returns detailed outcomes plus its committed navigation receipt. |
@@ -2995,6 +2995,7 @@ Underlying Go kind: `string` (no struct fields).
 | `projectKey` | string | yes |  |
 | `tier` | string | yes |  |
 | `ref` | string | yes |  |
+| `sortKey` | string | yes |  |
 | `offset` | \*uint32 | yes |  |
 | `limit` | \*uint32 | yes |  |
 | `base` | \*[appwire.NavigationReadBase](#navigationreadbase) | yes |  |
