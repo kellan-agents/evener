@@ -24,7 +24,7 @@ export function DisplaySection() {
 
   return (
     <div className={CLASS.root}>
-      <p className={CLASS.intro}>Composer preferences. Saved per-browser.</p>
+      <p className={CLASS.intro}>Display preferences. Saved per-browser.</p>
 
       <Switch
         label="Enter sends"

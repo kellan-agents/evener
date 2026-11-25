@@ -1303,9 +1303,10 @@ test("project pages with different sort keys read separately and share no cache 
 });
 
 // selectProjectPage is the read side of loadProjectPage's sort key: the
-// selector must construct the same keyID the loader stored under, or a
-// that name no sort key - or name "" - keep the default order's entry, the
-// one every existing caller already reads.
+// selector must construct the same keyID the loader stored under, or a page
+// loaded under "lastActivity" reads back as absent. A caller that names no
+// sort key - or names "" - keeps the default order's entry, the one every
+// existing caller already reads.
 test("selectProjectPage reads back a sorted page only under its own sort key", async () => {
   const row = (ref: string) => completeSession({ ref, title: ref, project: "p", live: true });
   await init((params) => {

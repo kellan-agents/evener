@@ -3991,11 +3991,43 @@ describe("project session order preference", () => {
     render(<Rail />);
     fireEvent.click(screen.getByText("Project"));
     expect(sessionTitles()).toEqual(["s-fresh", "s-newer", "s-older"]);
-    // The default-keyed page is already in the store, so its rows appear
-    // with no read at all once the pref selects its key.
+    // The default-keyed page is already in the store, so its rows render
+    // synchronously from the stored page once the pref selects its key,
+    // without waiting for the reads the toggle's reload effect issues.
     await act(async () => {
       prefsStore.getState().setProjectSessionOrder("createdAt");
     });
     expect(sessionTitles()).toEqual(["s-newer", "s-older", "s-stale"]);
+  });
+
+  test("toggling the order re-sorts a page-less project's rows", async () => {
+    // No project_page resources: the join's only inputs are the root's own
+    // rows, and the two rows' created and updated orders disagree, so a
+    // stale cached model shows the wrong order after the toggle.
+    const pagelessCatalog = catalogResource([{ key: "p", name: "Project", session_count: 2 }]);
+    const pagelessRoot = projectResource("p", [
+      summary({
+        ref: "local:made-new",
+        session_id: "made-new",
+        title: "s-made-new",
+        created_at: "2026-06-01T00:00:00Z",
+        updated_at: "2026-01-02T00:00:00Z",
+      }),
+      summary({
+        ref: "local:touched-new",
+        session_id: "touched-new",
+        title: "s-touched-new",
+        created_at: "2026-01-01T00:00:00Z",
+        updated_at: "2026-11-05T00:00:00Z",
+      }),
+    ]);
+    installState([pagelessCatalog, pagelessRoot]);
+    render(<Rail />);
+    fireEvent.click(screen.getByText("Project"));
+    expect(sessionTitles()).toEqual(["s-made-new", "s-touched-new"]);
+    await act(async () => {
+      prefsStore.getState().setProjectSessionOrder("lastActivity");
+    });
+    expect(sessionTitles()).toEqual(["s-touched-new", "s-made-new"]);
   });
 });

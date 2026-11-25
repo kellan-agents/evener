@@ -27,7 +27,7 @@ function renderWithToasts() {
   );
 }
 
-test("Enter sends remains the only Display setting and defaults off", () => {
+test("Enter sends defaults off and remains the section's only switch", () => {
   renderWithToasts();
   expect(screen.getByRole("switch", { name: "Enter sends" }).getAttribute("aria-checked")).toBe("false");
   expect(screen.getAllByRole("switch")).toHaveLength(1);

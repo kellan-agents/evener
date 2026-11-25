@@ -37,6 +37,11 @@ type ProjectPageDependency = Readonly<{
 type ProjectModelCacheEntry = Readonly<{
   root: object;
   pages: readonly ProjectPageDependency[];
+  // The order the cached sessions were sorted under. The page dependencies
+  // carry no order information when a project has no loaded pages - its rows
+  // all come from the root graph - so the order itself must ride in the entry
+  // or a preference toggle keeps serving the previously ordered sessions.
+  order: ProjectSessionOrderPref;
   result: RailProject;
 }>;
 const projectModelCache = new WeakMap<object, ProjectModelCacheEntry>();
@@ -203,17 +208,21 @@ function cachedProject(
   summary: NavigationProjectSummary,
   root: object,
   pages: readonly ProjectPageDependency[],
+  order: ProjectSessionOrderPref,
 ): RailProject | undefined {
   const cached = projectModelCache.get(summary as object);
-  return cached?.root === root && sameProjectPageDependencies(cached.pages, pages) ? cached.result : undefined;
+  return cached?.root === root && cached.order === order && sameProjectPageDependencies(cached.pages, pages)
+    ? cached.result
+    : undefined;
 }
 function cacheProject(
   summary: NavigationProjectSummary,
   root: object,
   pages: readonly ProjectPageDependency[],
+  order: ProjectSessionOrderPref,
   result: RailProject,
 ): RailProject {
-  projectModelCache.set(summary as object, { root, pages, result });
+  projectModelCache.set(summary as object, { root, pages, order, result });
   return result;
 }
 interface LoadedSection {
@@ -299,7 +308,7 @@ function projectFromGraph(
   if (normalized.presence === "gone") return null;
   const allPageStates = projectPageStates(pages, summary.key, projectSessionSortKey(order));
   const pageDependencies = projectPageDependencies(allPageStates);
-  const cached = cachedProject(summary, normalized.graph as object, pageDependencies);
+  const cached = cachedProject(summary, normalized.graph as object, pageDependencies, order);
   if (cached) return cached;
   const projectEntity = [...normalized.graph.entities.values()].find(
     (entity) =>
@@ -340,7 +349,7 @@ function projectFromGraph(
     more[tier] = pageRemaining?.remaining ?? (typeof metadataRemaining === "number" ? metadataRemaining : 0);
   }
   all.sort((a, b) => compareProjectSessions(a, b, order));
-  return cacheProject(summary, normalized.graph as object, pageDependencies, {
+  return cacheProject(summary, normalized.graph as object, pageDependencies, order, {
     ...summary,
     loaded: true,
     sessions: all,
