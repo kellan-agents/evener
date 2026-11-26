@@ -401,8 +401,37 @@ export const SkillEditor = forwardRef<SkillEditorHandle, SkillEditorProps>(funct
           command: (node) => createAtomView(node, "command", latest.current),
         },
         // Never parse clipboard HTML, even if it contains our data attributes.
-        handlePaste: (_view, event) => {
-          const text = event.clipboardData?.getData("text/plain").replace(/\r\n?/g, "\n");
+        // Text comes from the clipboard's own flavors, in fallback order:
+        // text/plain first; then text/uri-list, because iOS WebKit serves
+        // URL-only pasteboards (Share -> Copy Link) with no plain flavor at
+        // all (RFC 2483: lines starting with # are comments) - but only when
+        // the paste carries no files, so an image copy's public.url does not
+        // land as text beside the attachment its files stage; then the text
+        // of the slice ProseMirror already parsed, the only recoverable text
+        // for clippings whose flavors read empty at paste time. The slice's
+        // nodes themselves are never inserted.
+        handlePaste: (_view, event, slice) => {
+          const data = event.clipboardData;
+          let text = data?.getData("text/plain") ?? "";
+          // Beyond plain text, only a paste that carries no files may become
+          // text: an image copy also carries public.url, and its files are
+          // what the attachment path stages - the URL would only be noise
+          // beside it. WebKit serves URL-only pasteboards (Share -> Copy
+          // Link) with no plain flavor at all; RFC 2483 uri-list lines
+          // starting with # are comments. The parsed slice's text is the
+          // last resort for clippings whose flavors read empty at paste
+          // time; the slice's nodes themselves are never inserted.
+          if (!text && (data?.files?.length ?? 0) === 0) {
+            const uris = data
+              ?.getData("text/uri-list")
+              .split(/\r?\n/)
+              .map((line) => line.trim())
+              .filter((line) => line !== "" && !line.startsWith("#"))
+              .join(" ");
+            if (uris) text = uris;
+            else text = slice.content.textBetween(0, slice.content.size, "\n");
+          }
+          text = text.replace(/\r\n?/g, "\n");
           if (text)
             view.dispatch(
               closeHistory(view.state.tr.replaceSelectionWith(skillSchema.text(text), false))

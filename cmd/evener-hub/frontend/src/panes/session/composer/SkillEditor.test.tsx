@@ -39,6 +39,19 @@ function paste(editor: HTMLElement, text: string, html = "") {
   fireEvent.paste(editor, { clipboardData });
 }
 
+/** A paste with arbitrary clipboard flavors, like the URL-only pasteboards iOS
+ * WebKit serves for Share → Copy Link clippings: no text/plain flavor, the URL
+ * arrives as text/uri-list (with or without an html flavor). */
+function pasteClipboard(editor: HTMLElement, flavors: Record<string, string>, files: File[] = []) {
+  const clipboardData = {
+    getData: (type: string) => flavors[type] ?? "",
+    types: Object.keys(flavors),
+    files,
+    items: [],
+  };
+  fireEvent.paste(editor, { clipboardData });
+}
+
 function key(editor: HTMLElement, key: string, extra: Record<string, unknown> = {}) {
   fireEvent.keyDown(editor, { key, ...extra });
 }
@@ -156,6 +169,58 @@ describe("SkillEditor real ProseMirror view", () => {
     expect(result.editor.querySelector("b,script,[data-skill-name]")).toBeNull();
     key(result.editor, "Enter", { shiftKey: true });
     expect(result.value().text).toBe("one\ntwo\n/review\n");
+  });
+
+  it("inserts a URL-only iOS pasteboard from text/uri-list ahead of its html flavor", () => {
+    const result = mount({ text: "", skillNames: [] });
+    pasteClipboard(result.editor, {
+      "text/uri-list": "https://example.com/page",
+      "text/html": '<a href="https://example.com/page">Example page</a>',
+    });
+    expect(result.value()).toEqual({ text: "https://example.com/page", skillNames: [] });
+  });
+
+  it("filters comments, blank lines, and padding from a multi-URL uri-list paste", () => {
+    const result = mount({ text: "", skillNames: [] });
+    pasteClipboard(result.editor, {
+      "text/uri-list": "# Copied link\r\nhttps://a.example/x \r\n\r\nhttps://b.example/y",
+    });
+    expect(result.value()).toEqual({ text: "https://a.example/x https://b.example/y", skillNames: [] });
+  });
+
+  it("prefers plain text over uri-list when both flavors exist", () => {
+    const result = mount({ text: "", skillNames: [] });
+    pasteClipboard(result.editor, { "text/plain": "hello", "text/uri-list": "https://a.example" });
+    expect(result.value()).toEqual({ text: "hello", skillNames: [] });
+  });
+
+  it("falls back to the parsed slice's text when no plain or uri flavor is readable", () => {
+    const result = mount({ text: "", skillNames: [] });
+    pasteClipboard(result.editor, {
+      "text/html": '<a href="https://example.com/page">Example page</a>',
+    });
+    expect(result.value()).toEqual({ text: "Example page", skillNames: [] });
+  });
+
+  it("does not insert an image copy's URL beside the attachment its files carry", () => {
+    const result = mount({ text: "", skillNames: [] });
+    pasteClipboard(result.editor, { "text/uri-list": "https://example.com/pic.png" }, [
+      new File(["image"], "pic.png", { type: "image/png" }),
+    ]);
+    expect(result.value().text).toBe("");
+    expect(result.changed).not.toHaveBeenCalled();
+  });
+
+  it("tolerates a clipboard without a files list when reading a uri-list flavor", () => {
+    const result = mount({ text: "", skillNames: [] });
+    fireEvent.paste(result.editor, {
+      clipboardData: {
+        getData: (type: string) => (type === "text/uri-list" ? "https://example.com/no-files" : ""),
+        types: ["text/uri-list"],
+        items: [],
+      },
+    });
+    expect(result.value()).toEqual({ text: "https://example.com/no-files", skillNames: [] });
   });
 
   it("preserves newlines when the browser mutates a text node while typing", async () => {
