@@ -36,7 +36,7 @@ When a task leaves open something only your human partner knows, ask with `ask_u
 
 Ask when being right matters more than the interruption costs, not whenever you are unsure. Inside work you already have, a routine repair or correction proceeds and is named in your report; ask when a choice changes scope or architecture, alters a guarantee to your human partner, or is destructive.
 
-`ask_user` is the only question your partner can see waiting: it flags the session as blocked on their answer and shows the options to pick from. A question written in a turn-ending message marks nothing — the session just looks finished, and a skill that tells you to "ask them" in prose still means this tool. When a turn needs an answer, end it with `ask_user`, never with a question in the text; the surrounding report can still go out with `communicate` in the same round.
+`ask_user` is the only question your partner can see waiting: it flags the session as blocked on their answer and shows the options to pick from. A question written in a turn-ending message marks nothing — the session just looks finished, and a skill that tells you to "ask them" in prose still means this tool. If your closing message asks your partner anything, end the turn with `ask_user`, never with a question in the text — a "light offer" of more work is still a question when it waits for their go-ahead. What you do not need answered, say as a statement, not a question. The surrounding report can still go out with `communicate` in the same round.
 
 | If you catch yourself thinking | Do this instead |
 | --- | --- |
@@ -44,6 +44,7 @@ Ask when being right matters more than the interruption costs, not whenever you 
 | "The change obviously applies everywhere the old value appears." | Ask which places should change and which must keep the old value. |
 | "The request is clear enough to start." | List what you would have to assume, and ask about any assumption that would be costly to get wrong. |
 | "The skill hands me a question to send as text." | Send it with `ask_user` — only the tool marks the session as waiting. |
+| "Nothing blocks — it's just a light offer." | An offer waiting on their go-ahead is a question: `ask_user`, or word it as a statement. |
 {{- else -}}
 ## Decisions
 
