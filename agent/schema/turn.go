@@ -11,12 +11,65 @@ import (
 	"primeradiant.com/evener/llm"
 )
 
+// CommunicateNext values select what happens after a communicate call.
+const (
+	CommunicateNextSendAndEndTurn       = "send_and_end_turn"
+	CommunicateNextSendAndContinue      = "send_and_continue"
+	CommunicateNextLogQuietlyAndEndTurn = "log_quietly_and_end_turn"
+)
+
+// NormalizeQuietNote collapses runs of whitespace into single spaces and trims
+// leading and trailing whitespace without truncating the note.
+func NormalizeQuietNote(text string) string {
+	return strings.Join(strings.Fields(text), " ")
+}
+
+// CommunicateNextValues lists all valid values of the communicate next enum.
+var CommunicateNextValues = []string{
+	CommunicateNextSendAndEndTurn,
+	CommunicateNextSendAndContinue,
+	CommunicateNextLogQuietlyAndEndTurn,
+}
+
+// CommunicateArgsOutcome classifies a communicate tool call's arguments,
+// resolving next (defaulting omitted/empty to send_and_end_turn) and
+// historical end_turn values. ok is false when raw is empty or malformed JSON.
+func CommunicateArgsOutcome(raw json.RawMessage) (endTurn, quiet, ok bool) {
+	if len(raw) == 0 {
+		return false, false, false
+	}
+	var args struct {
+		Next    string `json:"next"`
+		EndTurn *bool  `json:"end_turn"`
+	}
+	if json.Unmarshal(raw, &args) != nil {
+		return false, false, false
+	}
+	switch strings.TrimSpace(args.Next) {
+	case CommunicateNextLogQuietlyAndEndTurn:
+		return false, true, true
+	case CommunicateNextSendAndContinue:
+		return false, false, true
+	case CommunicateNextSendAndEndTurn:
+		return true, false, true
+	case "":
+		if args.EndTurn != nil {
+			return *args.EndTurn, false, true
+		}
+		return true, false, true
+	default:
+		return false, false, true
+	}
+}
+
 // CommunicateToolState records the tool verdict independently of display output.
 type CommunicateToolState struct {
-	Accepted        *bool `json:"communicate_accepted,omitempty"`
-	EndTurn         *bool `json:"communicate_end_turn,omitempty"`
-	Quiet           *bool `json:"communicate_quiet,omitempty"`
-	BoundaryPending bool  `json:"communicate_boundary_pending,omitempty"`
+	Accepted        *bool  `json:"communicate_accepted,omitempty"`
+	EndTurn         *bool  `json:"communicate_end_turn,omitempty"`
+	Quiet           *bool  `json:"communicate_quiet,omitempty"`
+	QuietNote       string `json:"communicate_quiet_note,omitempty"`
+	QuietCommentary string `json:"communicate_quiet_commentary,omitempty"`
+	BoundaryPending bool   `json:"communicate_boundary_pending,omitempty"`
 }
 
 // DecodeCommunicateToolState reads the persisted tool state.
@@ -38,6 +91,32 @@ func IsQuietCommunicateState(raw json.RawMessage) bool {
 	}
 	state, ok := DecodeCommunicateToolState(raw)
 	return ok && state.IsQuiet()
+}
+
+// QuietCommunicateNote returns the normalized quiet note when raw records a
+// quiet yield, or "" otherwise.
+func QuietCommunicateNote(raw json.RawMessage) string {
+	if len(raw) == 0 {
+		return ""
+	}
+	state, ok := DecodeCommunicateToolState(raw)
+	if !ok || !state.IsQuiet() {
+		return ""
+	}
+	return strings.TrimSpace(state.QuietNote)
+}
+
+// QuietCommunicateCommentary returns the assistant prose that accompanied a
+// quiet yield when raw records one, or "" otherwise.
+func QuietCommunicateCommentary(raw json.RawMessage) string {
+	if len(raw) == 0 {
+		return ""
+	}
+	state, ok := DecodeCommunicateToolState(raw)
+	if !ok || !state.IsQuiet() {
+		return ""
+	}
+	return strings.TrimSpace(state.QuietCommentary)
 }
 
 // TurnKind identifies the category of a Turn in the Session history.
@@ -542,6 +621,13 @@ type Turn struct {
 	// OwningTurnID identifies the logical turn that owns an ordinary steering
 	// entry. It differs from StableTurnID, which identifies the client mutation.
 	OwningTurnID string `json:"owning_turn_id,omitempty"`
+	// QuietCompanion identifies an assistant response whose prose accompanied a
+	// quiet communicate call in the same round. The prose is hidden from the
+	// chat transcript, which shows the quiet yield notice instead.
+	QuietCompanion bool `json:"quiet_companion,omitempty"`
+	// QuietYield identifies a bare assistant response that parked the turn
+	// quietly while wakeable work remained live or after a wake needing no reply.
+	QuietYield bool `json:"quiet_yield,omitempty"`
 	// ResponseContextBoundary names the context boundary the request that
 	// produced this assistant turn was planned against: the latest checkpoint
 	// or summary turn at planning time, or "none" when history held none. It is

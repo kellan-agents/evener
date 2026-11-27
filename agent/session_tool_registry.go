@@ -528,3 +528,26 @@ func registerCoreTools(reg *tool.Registry, s *Session) error {
 	// registration are looked up by their own names.
 	return registerCommunicateTool(reg, deps)
 }
+
+var oneShotCeremonyToolNames = []string{"notes_agent_set", "notes_read", "urls_add", "urls_remove"}
+
+// omitOneShotCeremonyTools strips ceremony tools that only matter when a
+// later turn or session can read them, and records the subset that survived
+// earlier policy and subagent filters so one-shot delegates can re-admit
+// eligible notes_* tools on persistent resume.
+func omitOneShotCeremonyTools(reg *tool.Registry, s *Session) {
+	if s == nil || !s.cfg.TurnEndsProcess {
+		return
+	}
+	var omitted map[string]bool
+	for _, name := range oneShotCeremonyToolNames {
+		if reg.Get(name) != nil {
+			if omitted == nil {
+				omitted = make(map[string]bool, len(oneShotCeremonyToolNames))
+			}
+			omitted[name] = true
+			reg.Remove(name)
+		}
+	}
+	s.setOneShotOmittedTools(omitted)
+}

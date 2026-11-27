@@ -22,30 +22,31 @@ import { friendlyErrorMessage, LOCAL_HOST } from "@evener/appwire-client";
 import { useId, useLayoutEffect, useRef, useState } from "react";
 import { connectionStore } from "../../../stores/connection";
 import { extensionsStoreForHost, useExtensionsStoreForHost } from "../../../stores/extensions";
+import surfaceStyles from "../../../styles/surface.module.css";
 import {
   type CollectionAddResult,
   CollectionEditor,
   ConfirmDialog,
   type DirectoryActions,
   FormRow,
-  InlineNotice,
-  PathField,
   type PathFieldKind,
-  Skeleton,
   useToasts,
 } from "../../../widgets";
 import { requireClass } from "../../../widgets/internal/requireClass";
 import styles from "./dirListSetting.module.css";
+import { PathFieldWithPaths } from "./launchShared/fields";
+import { SectionGate } from "./sectionGate";
 import { useHostScopedLoad } from "./useConnectedEffect";
 
 const CLASS = {
   section: requireClass(styles.section, "dirListSetting.module.css", "section"),
   header: requireClass(styles.header, "dirListSetting.module.css", "header"),
-  title: requireClass(styles.title, "dirListSetting.module.css", "title"),
   count: requireClass(styles.count, "dirListSetting.module.css", "count"),
   help: requireClass(styles.help, "dirListSetting.module.css", "help"),
   addBlock: requireClass(styles.addBlock, "dirListSetting.module.css", "addBlock"),
 };
+
+const HEADING = `${surfaceStyles.settingsSectionHeading} ${surfaceStyles.settingsSectionHeadingPaneTitle}`;
 
 export interface PathListEditorProps {
   /** Accessible name for the row list. */
@@ -127,14 +128,13 @@ export function PathListEditor({
         renderAddField={({ value, onChange, disabled }) => (
           <div className={CLASS.addBlock}>
             <FormRow label={addLabel} htmlFor={addFieldId}>
-              <PathField
+              <PathFieldWithPaths
                 ariaLabel={addLabel}
-                directory={directory}
                 id={addFieldId}
                 value={value}
                 onChange={onChange}
                 kind={kind}
-                complete={complete}
+                paths={{ directory, complete }}
                 placeholder={addPlaceholder}
                 disabled={disabled}
               />
@@ -243,7 +243,7 @@ export function DirListSetting({ wireField, label, copy, host = LOCAL_HOST }: Di
   return (
     <section className={CLASS.section}>
       <header className={CLASS.header}>
-        <h2 className={CLASS.title}>{label}</h2>
+        <h2 className={HEADING}>{label}</h2>
         {showCount && (
           <span className={CLASS.count} data-count={items.length}>
             {items.length} {items.length === 1 ? "entry" : "entries"}
@@ -251,13 +251,7 @@ export function DirListSetting({ wireField, label, copy, host = LOCAL_HOST }: Di
         )}
       </header>
       <p className={CLASS.help}>{copy}</p>
-      {error !== null ? (
-        <InlineNotice tone="danger" live="status" data-reason="unavailable">
-          Failed to load: {error}
-        </InlineNotice>
-      ) : loading && layer === null ? (
-        <Skeleton />
-      ) : (
+      <SectionGate loading={error === null && loading && layer === null} error={error && `Failed to load: ${error}`}>
         <PathListEditor
           directory={{
             validatePath: (path, kind) => store.getState().validatePath(path, kind),
@@ -274,7 +268,7 @@ export function DirListSetting({ wireField, label, copy, host = LOCAL_HOST }: Di
           removeConfirmTitle="Remove directory"
           removeConfirmBody={(path) => `Remove "${path}" from ${lowerLabel}?`}
         />
-      )}
+      </SectionGate>
     </section>
   );
 }

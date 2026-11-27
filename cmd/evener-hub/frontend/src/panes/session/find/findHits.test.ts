@@ -222,22 +222,44 @@ test("a hit goes by the entry's display key, which outlives the item's id", () =
   expect(findHits([turnRow("t", [streamed])], "needle")).toEqual([{ key: "round:3", itemId: "item_9", rowIndex: 0 }]);
 });
 
-test("a reply is searched as it reads, not as its Markdown is written", () => {
+test("replies, prompts and user steers are searched as rendered Markdown, not raw source", () => {
   const reply =
     'The build **fail**ed in `main.go`, see [the log](https://example.test/log).\n\n- first point\n- second point\n\n```\nraw **stars** stay\n```\n\n<div class="fake-root">nested</div>';
-  const rows = [turnRow("t", [message("a", reply), message("u", "keep my **stars**", "userMessage")])];
+  const prompt = "keep my **stars** and [my link](https://prompt.test/doc), `raw **code**`";
+  const userSteer: ItemEntry = {
+    kind: "item",
+    id: "s",
+    turnId: "t",
+    sourceIndex: 2,
+    isMessage: false,
+    item: {
+      id: "s",
+      turnId: "t",
+      type: "steering",
+      source: "user",
+      text: "steer **bold** to [notes](https://steer.test/notes)",
+      status: "completed",
+    } as ItemModel,
+  };
+  const rows = [turnRow("t", [message("a", reply), message("u", prompt, "userMessage"), userSteer])];
   const keys = (query: string) => findHits(rows, query).map((hit) => hit.key);
   expect(keys("build failed in main.go, see the log")).toEqual(["a"]);
+  expect(keys("keep my stars and my link")).toEqual(["u"]);
+  expect(keys("steer bold to notes")).toEqual(["s"]);
   // Formatting marks are not words, and a link's address is not on the page.
   expect(keys("**fail**")).toEqual([]);
   expect(keys("example.test")).toEqual([]);
+  expect(keys("prompt.test")).toEqual([]);
+  expect(keys("steer.test")).toEqual([]);
+  expect(keys("**bold**")).toEqual([]);
   // Separate list items are separate words.
   expect(keys("first point second point")).toEqual(["a"]);
   expect(keys("pointsecond")).toEqual([]);
-  // Code, authored HTML and a prompt are shown as written.
+  // Code and authored HTML stay literal in both replies and prompts.
   expect(keys("raw **stars** stay")).toEqual(["a"]);
   expect(keys("fake-root")).toEqual(["a"]);
-  expect(keys("**stars**")).toEqual(["a", "u"]);
+  expect(keys("**stars**")).toEqual(["a"]);
+  expect(keys("raw **code**")).toEqual(["u"]);
 });
 
 test("an in-progress reply searches auto-closed Markdown as its live row reads", () => {
@@ -568,18 +590,22 @@ test("a fenced block's language label is on screen and searched", () => {
   expect(findHits(rows, "gofunc")).toEqual([]);
 });
 
-test("a character reference in a reply is searched as the character it shows", () => {
+test("a character reference in a reply or prompt is searched as the character it shows", () => {
   const reply = "The R&amp;D report costs &#36;5 &lt;today&gt;.\n\n`a &amp; b` stays code, and \\&amp; stays escaped.";
-  const rows = [turnRow("t", [message("a", reply), message("u", "typed &amp; kept", "userMessage")])];
+  const rows = [
+    turnRow("t", [message("a", reply), message("u", "typed &amp; rendered, `kept &amp; literal`", "userMessage")]),
+  ];
   const keys = (query: string) => findHits(rows, query).map((hit) => hit.key);
   expect(keys("R&D report costs $5 <today>")).toEqual(["a"]);
+  expect(keys("typed & rendered")).toEqual(["u"]);
   // The reference's own letters are not on the page.
   expect(keys("R&amp;D")).toEqual([]);
   expect(keys("report costs &#36;")).toEqual([]);
-  // Code, an escaped reference and a prompt show theirs as written.
+  expect(keys("typed &amp; rendered")).toEqual([]);
+  // Code and escaped references stay as written in both replies and prompts.
   expect(keys("a &amp; b")).toEqual(["a"]);
   expect(keys("&amp; stays escaped")).toEqual(["a"]);
-  expect(keys("typed &amp; kept")).toEqual(["u"]);
+  expect(keys("kept &amp; literal")).toEqual(["u"]);
   // An unterminated reference stays literal in the rendered reply.
   const malformed = [turnRow("t", [message("unfinished", "costs &#36")])];
   expect(findHits(malformed, "$")).toEqual([]);
@@ -900,4 +926,141 @@ test("a delegate report's failed diagram becomes searchable when it falls back t
   expect(findHits(rows, "reportNode", { config: TOOLS }).map((hit) => hit.itemId)).toEqual(["steer"]);
   act(() => noteMermaidRender(source, "ok"));
   expect(findHits(rows, "reportNode", { config: TOOLS })).toEqual([]);
+});
+
+test("quiet_yield demoted commentary is searchable standalone and inside a quietYieldGroup", () => {
+  const quietItem = (id: string, turnId: string, commentary?: string): ItemModel => ({
+    id,
+    turnId,
+    type: "systemMessage",
+    text: "quiet-sentinel",
+    eventKind: "quiet_yield",
+    ...(commentary === undefined ? {} : { raw: { commentary } }),
+  });
+  const standaloneRows = projectedRows([quietItem("qy_single", "turn_1", "quokka-single")]);
+  expect(findHits(standaloneRows, "quokka-single", { config: TOOLS })).toEqual([
+    { key: "qy_single", itemId: "qy_single", rowIndex: 0, opens: ["qy_single"], opensIgnoreBaseline: true },
+  ]);
+
+  const model: ThreadModel = {
+    ...makeTranscriptPreviewModel(),
+    ref: "ref_a",
+    turns: [
+      { id: "turn_1", status: "completed", items: [quietItem("qy_1", "turn_1")] },
+      { id: "turn_2", status: "completed", items: [quietItem("qy_2", "turn_2", "quokka-grouped")] },
+    ],
+  };
+  const groupedRows = transcriptRowsForProjection(projectThread(model, TOOLS));
+  expect(findHits(groupedRows, "quokka-grouped", { config: TOOLS })).toEqual([
+    { key: "qy_2", itemId: "qy_2", rowIndex: 0, opens: ["quiet-yield-group:qy_1", "qy_2"], opensIgnoreBaseline: true },
+  ]);
+
+  const completedNotif = notificationWireItem("job-shell-completed");
+  const fullModel: ThreadModel = {
+    ...makeTranscriptPreviewModel(),
+    ref: "ref_a",
+    turns: [
+      {
+        id: "turn_w1",
+        status: "completed",
+        items: [
+          {
+            id: "r_1",
+            turnId: "turn_w1",
+            type: "reasoning",
+            text: "",
+            reasoningSummaries: [["quokka-thought"]],
+            status: "completed",
+          },
+          {
+            id: "steer_1",
+            turnId: "turn_w1",
+            type: "steering",
+            steeringKind: completedNotif.steeringKind,
+            text: completedNotif.text ?? "",
+            status: "completed",
+          },
+          quietItem("qy_w1", "turn_w1"),
+        ],
+      },
+      { id: "turn_w2", status: "completed", items: [quietItem("qy_w2", "turn_w2", "quokka-commentary")] },
+    ],
+  };
+  const FULL = makeTranscriptDisplayConfig({ kind: "preset", level: "full" });
+  const fullRows = transcriptRowsForProjection(projectThread(fullModel, FULL));
+  const fullOpts = { config: FULL, sessionRef: "ref_a" };
+  const groupId = "quiet-yield-group:r_1";
+  expect(findHits(fullRows, "quokka-thought", fullOpts)).toEqual([
+    { key: "r_1", itemId: "r_1", rowIndex: 0, opens: [groupId, "r_1"], opensIgnoreBaseline: true },
+  ]);
+  expect(findHits(fullRows, "Run the agent tests", fullOpts)).toEqual([
+    {
+      key: "steer_1",
+      itemId: "steer_1",
+      rowIndex: 0,
+      opens: [groupId, "notification:ref_a:job_7:steer_1:0"],
+      opensIgnoreBaseline: true,
+    },
+  ]);
+  expect(findHits(fullRows, "primeradiant.com/evener/agent", fullOpts)).toEqual([
+    {
+      key: "steer_1",
+      itemId: "steer_1",
+      rowIndex: 0,
+      opens: [groupId, "notification:ref_a:job_7:steer_1:0"],
+      opensIgnoreBaseline: true,
+    },
+  ]);
+  expect(findHits(fullRows, "quokka-commentary", fullOpts)).toEqual([
+    { key: "qy_w2", itemId: "qy_w2", rowIndex: 0, opens: [groupId, "qy_w2"], opensIgnoreBaseline: true },
+  ]);
+
+  const housekeepingConfig = makeTranscriptDisplayConfig(
+    { kind: "preset", level: "full" },
+    { roundTimings: true, systemEvents: true },
+  );
+  const housekeepingModel: ThreadModel = {
+    ...makeTranscriptPreviewModel(),
+    ref: "ref_a",
+    turns: [
+      {
+        id: "turn_h1",
+        status: "completed",
+        items: [
+          {
+            id: "rt_1",
+            turnId: "turn_h1",
+            type: "systemMessage",
+            eventKind: "round_timings",
+            text: "Round 1 · 120ms · quokka-timing",
+            status: "completed",
+          },
+          {
+            id: "notes_1",
+            turnId: "turn_h1",
+            type: "systemMessage",
+            eventKind: "notes-context",
+            text: "quokka-notes",
+            status: "completed",
+          },
+          quietItem("qy_h1", "turn_h1"),
+        ],
+      },
+      { id: "turn_h2", status: "completed", items: [quietItem("qy_h2", "turn_h2")] },
+    ],
+  };
+  const hkRows = transcriptRowsForProjection(projectThread(housekeepingModel, housekeepingConfig));
+  const hkOpts = { config: housekeepingConfig, sessionRef: "ref_a" };
+  expect(findHits(hkRows, "quokka-timing", hkOpts)).toEqual([
+    { key: "rt_1", itemId: "rt_1", rowIndex: 0, opens: ["quiet-yield-group:rt_1"], opensIgnoreBaseline: true },
+  ]);
+  expect(findHits(hkRows, "quokka-notes", hkOpts)).toEqual([
+    {
+      key: "notes_1",
+      itemId: "notes_1",
+      rowIndex: 0,
+      opens: ["quiet-yield-group:rt_1", "notes_1"],
+      opensIgnoreBaseline: true,
+    },
+  ]);
 });

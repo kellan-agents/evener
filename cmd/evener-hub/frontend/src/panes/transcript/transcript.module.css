@@ -34,9 +34,26 @@
 
 /* The job's command, pinned above the output in the same shell command block
  * the transcript's shell rows use; flex:none keeps it out of the log's own
- * scroll. */
+ * scroll. The command is unbounded by nature - a generated script wraps to
+ * dozens of lines in a narrow column - so the block is capped at a share of
+ * the column and scrolls inside itself. Uncapped, it takes the whole column:
+ * .joblog flexes into whatever is left, and a zero-height scroll port makes
+ * the virtual list render no rows at all. The output keeps the majority, and
+ * min-height:0 lets the cap bite without making .joblogCommand itself the
+ * scroll container: instead, CodeBlock shrinks and scrolls inside its own
+ * <pre> (via the --codeblock-* host seams) so the top-right Copy/language
+ * header stays pinned above the scrolled lines rather than scrolling out of
+ * view. */
 .joblogCommand {
   flex: 0 0 auto;
+  display: flex;
+  flex-direction: column;
+  max-height: 40%;
+  min-height: 0;
+  --codeblock-flex-shrink: 1;
+  --codeblock-overflow: clip;
+  --codeblock-overflow-y: auto;
+  --codeblock-overflow-x: clip;
   padding: var(--space-2) var(--space-3);
   border-bottom: 1px solid var(--edge);
 }

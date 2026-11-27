@@ -1,3 +1,4 @@
+import "../panes/session/testing/editorGeometry";
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -16,12 +17,12 @@ import { installLocalStorage, MemoryStorage } from "../storageTestUtils";
 import { resetAuthStatusesStoreForTests } from "../stores/authStatuses";
 import { connectionStore } from "../stores/connection";
 import { navigationStore, resetNavigationStoreForTests } from "../stores/navigation/store";
-import { resetPrefsStoreForTests } from "../stores/prefs";
+import { prefsStore, resetPrefsStoreForTests } from "../stores/prefs";
 import { activityDetailsThread, answerActivityRead } from "../stores/sessionActivityTestUtils";
 import { resetSettingsHostForTests } from "../stores/settingsHost";
 import { resetSettingsOverviewStoreForTests } from "../stores/settingsOverview";
 import { initTranscriptDisplay } from "../stores/transcriptDisplay";
-import { escapeRegExp, readModuleCss } from "../styles/cssBlock";
+import { readModuleCss, topRuleBlock } from "../styles/cssBlock";
 import { AppShell } from "./AppShell";
 import {
   installLocation,
@@ -35,7 +36,6 @@ import {
 } from "./appShellTestUtils";
 import { paletteStore } from "./palette/paletteController";
 import { navigate } from "./routing";
-import { MOBILE_QUERY } from "./useIsMobile";
 import { getDockviewApi, resetWorkspaceStoreForTests, workspaceStore } from "./workspace";
 
 const paneFor = (ref: string) =>
@@ -112,35 +112,17 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-// --- mobile full-bleed shell (2026-07-30-mobile-session-layout-design.md, decision 1) ---
-// jsdom performs no layout, so media-query rules are verified by reading the
-// CSS module's own source, the same way panescaffold.test.tsx verifies its
-// truncation rule.
-
 test("mobile: the shell content frame drops its padding so the workspace is full-bleed", () => {
-  const here = dirname(fileURLToPath(import.meta.url));
-  const css = readFileSync(join(here, "AppShell.module.css"), "utf8");
-  const mobile = css.match(new RegExp(`@media ${escapeRegExp(MOBILE_QUERY)} \\{([\\s\\S]*?)\\n\\}`));
-  expect(mobile).not.toBeNull();
-  const contentRule = mobile![1]!.match(/\.content \{([^}]*)\}/);
-  expect(contentRule).not.toBeNull();
-  expect(contentRule![1]).toContain("padding: 0");
-  // The flush sidebar is the rule at EVERY width now, so the mobile block
-  // carries no gap reset of its own; a gap: here would mean someone added
-  // one back on .content above, which the full-bleed contract test forbids.
-  expect(contentRule![1]).not.toContain("gap:");
+  const content = topRuleBlock(readModuleCss(import.meta.url, "AppShell.module.css"), ".content");
+  expect(content).toContain("padding: 0");
+  expect(content).not.toContain("gap:");
 });
 
 test("mobile: the shell spends --keyboard-inset as bottom padding so the composer clears the on-screen keyboard", () => {
-  // See useKeyboardInset.ts's header for the mechanism. Comments are stripped
-  // before matching (testing.md: a comment quoting the declaration must not
-  // satisfy the assertion).
   const css = readModuleCss(import.meta.url, "AppShell.module.css");
-  const mobile = css.match(new RegExp(`@media ${escapeRegExp(MOBILE_QUERY)} \\{([\\s\\S]*?)\\n\\}`));
-  expect(mobile).not.toBeNull();
-  const shellRule = mobile![1]!.match(/\.shell \{([\s\S]*?)\n[ ]{2}\}/);
-  expect(shellRule).not.toBeNull();
-  expect(shellRule![0]).toContain("padding-bottom: var(--keyboard-inset, 0px)");
+  const mobile = topRuleBlock(css, ".shell[data-mobile]");
+  expect(mobile).toContain("height: auto");
+  expect(mobile).toContain("padding-bottom: var(--keyboard-inset, 0px)");
 });
 
 test("mobile: the shared shell follows the visible viewport while retaining a vh fallback", () => {
@@ -227,6 +209,70 @@ test("ordinary mobile Sessions opens the panel without publishing a route transi
   } finally {
     push.mockRestore();
     replace.mockRestore();
+  }
+});
+
+test("the iPhone Sessions drawer hands off hub selection and accepts a native route in place", async () => {
+  vi.stubGlobal("innerWidth", 390);
+  installMobileViewport();
+  const agent = vi.spyOn(navigator, "userAgent", "get").mockReturnValue("EvenerNative/1");
+  const messages: unknown[] = [];
+  vi.stubGlobal("ReactNativeWebView", { postMessage: (json: string) => messages.push(JSON.parse(json)) });
+  const ref = "local:from-alert";
+  const sessionPath = `/s/${encodeURIComponent(ref)}`;
+  installLocationForRoute(ref);
+  window.history.replaceState({}, "", sessionPath);
+  const client = navClient();
+  client.on("thread/read", () => ({ thread: threadStartResponse(ref).thread }));
+  try {
+    render(<AppShell client={client} />);
+    const composer = await screen.findByRole("textbox", { name: "Message" });
+    expect(document.body.dataset.iphoneGlass).toBe("opaque");
+    const setGlass = (glass: boolean) =>
+      window.dispatchEvent(new MessageEvent("message", { data: JSON.stringify({ type: "material", glass }) }));
+    setGlass(true);
+    expect(document.body.dataset.iphoneGlass).toBe("regular");
+    setGlass(false);
+    expect(document.body.dataset.iphoneGlass).toBe("opaque");
+    await userEvent.type(composer, "z");
+    expect(messages).toContainEqual({ type: "editing", active: true });
+    await userEvent.click(screen.getByRole("button", { name: /^Sessions/ }));
+    expect(messages).toContainEqual({ type: "editing", active: false });
+    act(() => prefsStore.getState().setTheme("dark"));
+    expect(messages).toContainEqual({ type: "appearance", dark: true });
+    act(() => prefsStore.getState().setTheme("light"));
+    expect(messages.at(-1)).toEqual({ type: "appearance", dark: false });
+    await userEvent.click(await screen.findByRole("button", { name: "Hubs on this iPhone" }));
+    expect(messages).toContainEqual({ type: "ready" });
+    expect(messages).toContainEqual({ type: "hubMenu" });
+
+    const launcher = "/new?dir=%2Fwork&prompt=Review+the+changes";
+    const data = JSON.stringify({ type: "navigate", path: launcher });
+    act(() => {
+      window.dispatchEvent(new MessageEvent("message", { data, origin: "https://another.site" }));
+    });
+    expect(window.location.pathname).toBe(sessionPath);
+    act(() => {
+      window.dispatchEvent(new MessageEvent("message", { data }));
+    });
+    expect(await screen.findByRole("button", { name: "Start" })).toBeTruthy();
+    expect(screen.getByRole("textbox", { name: "Prompt" }).textContent).toBe("Review the changes");
+    expect(window.location.search).toBe(launcher.slice("/new".length));
+    expect(messages).toContainEqual({ type: "route", path: launcher });
+    for (const host of ["desk", "studio"]) {
+      const path = `/settings/credentials?host=${host}`;
+      act(() => navigate(path));
+      await waitFor(() => expect(messages).toContainEqual({ type: "route", path }));
+    }
+    act(() => {
+      window.dispatchEvent(
+        new MessageEvent("message", { data: JSON.stringify({ type: "navigate", path: sessionPath }) }),
+      );
+    });
+    await screen.findByRole("textbox", { name: "Message" });
+    expect(messages.at(-1)).toEqual({ type: "route", path: sessionPath });
+  } finally {
+    agent.mockRestore();
   }
 });
 

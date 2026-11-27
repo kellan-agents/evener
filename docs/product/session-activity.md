@@ -1043,15 +1043,13 @@ describe the executable proof and presentation contract.
 The [browser binding](../../cmd/evener-hub/frontend/src/stores/sessionActivity.ts)
 shares a store by actual client object, requested ref and scope. A committed view
 acquires its holder; an abandoned render starts no read. Every visible ordinary
-session pane observes that pane's
-summary and its subtree summary (for the Agents count) by explicit ref on both
-viewports, through its flush status footer on desktop and through the
-activity line above the composer card on the phone, which renders no footer
-strip. A folded resting composer hides that line but keeps observing through
-the session menu's hidden discovery owner, so a pane's counts are current the
-moment its card expands. Side-by-side panes retain independent counts while duplicate consumers of one
-ref and scope share
-the same owner. The Agents tab shares the `subtree` delegate collection on the
+session pane observes its session summary and subtree summary (for Agents) by
+explicit ref. On desktop the flush status footer owns discovery. On phone the
+composer's session menu keeps discovery active at rest and while editing,
+without a visible activity line or status footer. Opening the phone Overview
+sheet mounts its activity rows as another consumer of those same scoped
+summaries. Side-by-side panes retain independent counts while duplicate
+consumers of one ref and scope share the same owner. The Agents tab shares the `subtree` delegate collection on the
 same subtree store that supplies the count, while Jobs and Watches tabs observe
 their own session-scoped collection. A visible page boundary supplies further demand,
 while the shared store retains and retries an interrupted continuation. The
@@ -1064,18 +1062,25 @@ a store another holder keeps alive takes in no late page for a view that has
 closed. Its retained rows stay, and the next observer reconciles them with a
 fresh walk, as for any retained store.
 
-About is the last sidebar category and has no count or chip. Its
-[adapter](../../cmd/evener-hub/frontend/src/shell/activitybar/AboutTab.tsx)
-holds the shared thread model for the sidebar's explicit public session ref and
-renders the existing details body. That model owner supplies hydration,
-accounting, subscriptions and reconnect recovery. About adds no collection
-demand, lifecycle mutation or cache of its own: a local session's branch row
-resolves at view time through the [shared git-head
+About and Links are the first two Overview categories and carry no footer chip.
+Their adapters
+([`AboutTab.tsx`](../../cmd/evener-hub/frontend/src/shell/activitybar/AboutTab.tsx)
+and
+[`LinksTab.tsx`](../../cmd/evener-hub/frontend/src/shell/activitybar/LinksTab.tsx))
+hold the shared thread model for the sidebar's explicit public session ref,
+rendering the shared details body (with inline-editable Goal when the session
+supports goals) and the dedicated Links view (recency/grouped toggle, inline
+filter, hover-underlined labels, hover/focus destination bar, and Open beside
+for local files). The Links tab count reads any already-tracked thread model
+without starting a read of its own. That model owner supplies hydration,
+accounting, subscriptions and reconnect recovery. About and Links add no
+collection demand or cache of their own: a local session's branch row resolves
+at view time through the [shared git-head
 lookup](../../cmd/evener-hub/frontend/src/shell/gitLocation.ts) the session
 location line rides — for local refs only, suppressed while the wire's own
-gitBranch answers, and failing soft to no row. Its category
-choice uses the same per-session persistence without changing another category's
-disclosure or scroll intent.
+gitBranch answers, and failing soft to no row. Their category choices use the
+same per-session persistence without changing another category's disclosure or
+scroll intent.
 
 The composer names its receiving conversation even when a child or output pane
 has focus. Job rows and output tabs use the job description when present, and
@@ -1185,16 +1190,22 @@ cause an `evener/thread/*` activity read for every session in the navigation
 rail; the rail's open title card makes only its own one-ref pulse read, as
 described under [Navigation session status](#navigation-session-status).
 
-Session chrome and the navigation rail expose Overview through their session
-action menus. On the phone, that action opens the full-screen shared activity
-sidebar, preserving the last selected category for the focused session. Its
+The session header carries Find in session beside Overview at every width (44px
+icon buttons below 900px, labeled controls on desktop). Opening Overview from
+the session header, navigation rail, or embedded session action menu opens the
+shared activity sidebar directly for that session (a newly inspected session
+opens on About; a revisited session keeps its last selected tab; an open
+inspection keeps its active tab while drilling; both desktop and mobile use the
+same underline tablist). The menu's
 optional active count sums the subagents running at every depth and the
 session's own running jobs, only when both are known; watches and completed work
 are not part of that number. The sidebar's Jobs, Watches and Tasks tabs use
-session-scoped reads on both viewports, while About uses the shared session
-model. The Agents tab and all Agents counts (the pane's activity chip, the
-sidebar's Agents tab label, each cascade scope's Agents chip, the Overview
-action count, and the conversation's liveness line) read the same
+session-scoped reads on both viewports, while About and Links use the shared
+session model on both desktop and mobile (About rendering the calm five-group
+details body with inline-editable Goal, and Links rendering saved session links
+with recency/grouped organization). The Agents tab and all Agents counts (the desktop pane's activity
+chip, the sidebar's Agents tab label, each cascade scope's Agents chip, the
+Overview action count, and the conversation's liveness line) read the same
 subtree store
 ([`useSubagentCounts`](../../cmd/evener-hub/frontend/src/stores/sessionActivity.ts)
 and `AgentsTab`): the tab renders the subtree's active branches nested beneath

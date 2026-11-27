@@ -17,7 +17,7 @@ import {
   type TranscriptRenderContextValue,
   useTranscriptRenderContext,
 } from "../../../transcriptDisplay/renderContext";
-import { type CadenceState, CodeBlock, StatusDot } from "../../../widgets";
+import { CodeBlock, StatusDot } from "../../../widgets";
 import { disclosureDefault, isDisclosureOpen, toggleDisclosure } from "../../../widgets/disclosure/disclosureStore";
 import { requireClass } from "../../../widgets/internal/requireClass";
 import { useFindReveal } from "../find/findReveal";
@@ -28,6 +28,7 @@ import {
   holdsNeedle,
   toolCallTexts,
 } from "../find/toolCallHits";
+import { clipCodePoints } from "./clipCodePoints";
 import { FileOpenBesideButton, fileDocParams } from "./fileOpenBeside";
 import { ImageGallery } from "./flow/ImageGallery";
 import { OpenTranscriptButton } from "./openTranscript";
@@ -36,10 +37,10 @@ import styles from "./toolcallitem.module.css";
 import { type ToolRendererDescriptor, toolCallFailed, toolRendererFor } from "./toolRenderers";
 import { rowFromDelegateItem } from "./tools/subagentModule";
 import {
+  DELEGATE_STATUS,
   delegateStableState,
   removeSubagentRow,
   rowKeyForDelegateItem,
-  type SubagentRowKind,
   turnScopeKey,
   upsertSubagentRow,
 } from "./tools/subagentModuleStore";
@@ -51,20 +52,7 @@ const CLASS = {
   error: requireClass(styles.error, "toolcallitem.module.css", "error"),
 };
 
-const DELEGATE_INDICATOR_STATE: Record<SubagentRowKind, CadenceState> = {
-  running: "working",
-  done: "ended",
-  stopped: "ended",
-  failed: "failed",
-  unknown: "idle",
-};
-
 const DELEGATE_INTENT_PREVIEW_MAX = 120;
-
-function clipDelegateIntent(text: string, max: number): string {
-  const codePoints = Array.from(text);
-  return codePoints.length <= max ? text : `${codePoints.slice(0, max).join("")}…`;
-}
 
 function delegateIntentOf(item: ItemModel): string | undefined {
   const statedIntent = statedIntentOf(item);
@@ -73,7 +61,7 @@ function delegateIntentOf(item: ItemModel): string | undefined {
   const args = parseArgs(item.argumentsJSON);
   // Transcripts recorded before the rename carry the brief under `task`.
   const brief = (str(args, "prompt") ?? str(args, "task"))?.replace(/\s+/g, " ").trim();
-  return brief === undefined || brief === "" ? undefined : clipDelegateIntent(brief, DELEGATE_INTENT_PREVIEW_MAX);
+  return brief === undefined || brief === "" ? undefined : clipCodePoints(brief, DELEGATE_INTENT_PREVIEW_MAX);
 }
 
 /** The words a row's intent line shows: the delegate's own brief (which the
@@ -153,7 +141,7 @@ function ToolCallItemBody({ item, live, sessionRef, projectedSummary, renderCont
   const delegateState = isDelegate ? delegateStableState(item, live, sessionRef, thread, entities) : undefined;
   const delegateStatus =
     isDelegate && delegateState !== undefined && delegateState.kind !== "unknown" ? (
-      <StatusDot state={DELEGATE_INDICATOR_STATE[delegateState.kind]} />
+      <StatusDot state={DELEGATE_STATUS[delegateState.kind].cadence} />
     ) : undefined;
   const delegateScopeKey = turnScopeKey(sessionRef, item.turnId);
 
