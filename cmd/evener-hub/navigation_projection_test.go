@@ -1347,7 +1347,7 @@ func TestNavigationProjectPageLastActivitySortsRowsWithoutMutatingSharedTier(t *
 			},
 		}},
 	}
-	projection, err := buildNavigationProjection(navigationBuildInputs{GenerationID: "00112233445566778899aabbccddeeff", Revision: 1, Tree: tree})
+	projection, err := buildNavigationProjection(t.Context(), navigationBuildInputs{GenerationID: "00112233445566778899aabbccddeeff", Revision: 1, Tree: tree})
 	if err != nil {
 		t.Fatal(err)
 	}
