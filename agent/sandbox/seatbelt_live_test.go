@@ -50,7 +50,7 @@ func liveResolve(t *testing.T, mode Mode, netOn bool, extra ...func(*SandboxPoli
 // root — the two cases must be exercised separately.
 func liveResolveKind(t *testing.T, kind WorkspaceKind, mode Mode, netOn bool, extra ...func(*SandboxPolicy)) (ResolvedPolicy, string) {
 	t.Helper()
-	cwd := MaterializeWorkspace(t, kind)
+	cwd := materializeWorkspace(t, kind)
 	net := netOn
 	policy := SandboxPolicy{Mode: mode, Network: &net}
 	for _, f := range extra {
@@ -79,7 +79,7 @@ func runUnderSeatbelt(t *testing.T, rp ResolvedPolicy, cwd string, command ...st
 	}
 	cmd := exec.Command(argv[0], argv[1:]...) //nolint:gosec // argv[0] is the hard-coded /usr/bin/sandbox-exec
 	cmd.Dir = cwd
-	cmd.Env = ApplyEnvFloor(os.Environ(), rp, sessionTmp)
+	cmd.Env = ApplyEnvFloor(os.Environ(), rp, sessionTmp, rp.SessionDir)
 	out, err := cmd.CombinedOutput()
 	exit := 0
 	var ee *exec.ExitError
@@ -427,13 +427,6 @@ func TestSeatbeltLiveInfraGrantNeverUnmasksDenylist(t *testing.T) {
 	})
 }
 
-// TestSeatbeltLiveContractOnHost re-runs M1's exported contract suite against the
-// live host's real facts, confirming the resolver agrees with the Mac it runs on.
-func TestSeatbeltLiveContractOnHost(t *testing.T) {
-	requireLiveSeatbelt(t)
-	AssertResolve(t, Resolve)
-}
-
 // goTelemetryDenialLine is the ONE tolerated stderr line from a sandboxed `go`
 // invocation: Go's telemetry uploader stats/creates a token file under the
 // user's Go config directory, which sits outside every sandbox root by
@@ -482,7 +475,7 @@ func TestSeatbeltLiveGoTestTelemetryDenialIsTheOnlyStderr(t *testing.T) {
 	}
 	cmd := exec.Command(argv[0], argv[1:]...) //nolint:gosec // argv[0] is the hard-coded /usr/bin/sandbox-exec
 	cmd.Dir = cwd
-	cmd.Env = ApplyEnvFloor(os.Environ(), rp, sessionTmp)
+	cmd.Env = ApplyEnvFloor(os.Environ(), rp, sessionTmp, rp.SessionDir)
 	var stdout, stderr strings.Builder
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
@@ -552,7 +545,7 @@ func runUnderSeatbeltSplit(t *testing.T, rp ResolvedPolicy, cwd string, command 
 	}
 	cmd := exec.Command(argv[0], argv[1:]...) //nolint:gosec // argv[0] is the hard-coded /usr/bin/sandbox-exec
 	cmd.Dir = cwd
-	cmd.Env = ApplyEnvFloor(os.Environ(), rp, sessionTmp)
+	cmd.Env = ApplyEnvFloor(os.Environ(), rp, sessionTmp, rp.SessionDir)
 	var outBuf, errBuf strings.Builder
 	cmd.Stdout = &outBuf
 	cmd.Stderr = &errBuf
@@ -687,7 +680,7 @@ func runUnderSeatbeltCanon(t *testing.T, rp ResolvedPolicy, cwd string, canon Ca
 	argv := seatbeltArgs(pathToSeatbelt, text, params, command)
 	cmd := exec.Command(argv[0], argv[1:]...) //nolint:gosec // argv[0] is the hard-coded /usr/bin/sandbox-exec
 	cmd.Dir = cwd
-	cmd.Env = ApplyEnvFloor(os.Environ(), rp, sessionTmp)
+	cmd.Env = ApplyEnvFloor(os.Environ(), rp, sessionTmp, rp.SessionDir)
 	out, err := cmd.CombinedOutput()
 	exit := 0
 	var ee *exec.ExitError
@@ -775,7 +768,7 @@ func TestSeatbeltLiveGitCredentialsStayMasked(t *testing.T) {
 	}
 	facts.Home = home
 	facts.GitGlobalConfigPaths = []string{config}
-	cwd := MaterializeWorkspace(t, MainCheckout)
+	cwd := materializeWorkspace(t, MainCheckout)
 	net := true
 	rp, err := Resolve(SandboxPolicy{Mode: ModeRestricted, Network: &net}, facts, cwd)
 	if err != nil {
@@ -891,7 +884,7 @@ func TestSeatbeltLiveReadsEvenerContentThroughTheMask(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	cwd := MaterializeWorkspace(t, MainCheckout)
+	cwd := materializeWorkspace(t, MainCheckout)
 	for layout, write := range evenerContentLayouts {
 		fx := write(t, filepath.Join(home, layout))
 		facts := RealProber{}.Probe()
@@ -1138,7 +1131,7 @@ func TestSeatbeltLiveChildEnvFdReachesConfinedChild(t *testing.T) {
 
 	const secret = "EVENER-LIVE-CHILD-ENV-7009"
 	cmd := exec.Command("/usr/bin/env") //nolint:noctx // argv[0] is the hard-coded /usr/bin/sandbox-exec after confinement
-	cmd.Env = ApplyEnvFloor(os.Environ(), rp, sessionTmp)
+	cmd.Env = ApplyEnvFloor(os.Environ(), rp, sessionTmp, rp.SessionDir)
 	if err := w.ConfineWithChildEnv(cmd, cwd, ChildEnvDelta{Set: map[string]string{
 		"logging.level.root": "debug",
 		"MCP_SERVER_TOKEN":   secret,

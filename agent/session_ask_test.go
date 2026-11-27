@@ -16,6 +16,7 @@ import (
 	"primeradiant.com/evener/agent/internal/agenttest"
 	"primeradiant.com/evener/agent/internal/goal"
 	"primeradiant.com/evener/agent/internal/hooks"
+	"primeradiant.com/evener/agent/internal/tool"
 	"primeradiant.com/evener/agent/plugin"
 	"primeradiant.com/evener/agent/schema"
 	"primeradiant.com/evener/agent/transcript"
@@ -2931,12 +2932,13 @@ func TestAskUser_ForkedChildDoesNotApplyItsOwnJournalToAnInheritedAnsweringSteer
 		ParentSessionID: "01KPARENT0000000000000000",
 		DivergenceTurn:  len(inheritedHistory) + 1,
 	}
+	seedTestTranscript(t, stateDir, meta, inheritedHistory...)
 	restored, err := RestoreSessionFromMetaWithConfig(
 		c,
 		NewOpenAIProfile("gpt-5.2"),
 		execenv.NewLocalExecutionEnvironment(t.TempDir()),
 		meta,
-		RestoreSessionConfig{StateDir: stateDir, resumeHistory: inheritedHistory},
+		RestoreSessionConfig{StateDir: stateDir},
 	)
 	if err != nil {
 		t.Fatalf("RestoreSessionFromMetaWithConfig: %v", err)
@@ -3297,15 +3299,15 @@ func TestAskUser_RestoreRederivesIdleAfterInterruptedAsk(t *testing.T) {
 	if err != nil {
 		t.Fatalf("transcript.NewWriter: %v", err)
 	}
-	if err := tw.Append(schema.NewTurn(schema.TurnUserInput, llm.User("which db should we use?"))); err != nil {
+	if _, err := tw.Record(schema.NewTurn(schema.TurnUserInput, llm.User("which db should we use?")), transcript.RecordOptions{Door: transcript.DoorBuffered}); err != nil {
 		t.Fatalf("append user turn: %v", err)
 	}
-	if err := tw.Append(schema.NewTurn(schema.TurnAssistant, llm.Message{
+	if _, err := tw.Record(schema.NewTurn(schema.TurnAssistant, llm.Message{
 		Role: llm.RoleAssistant,
 		Content: []llm.ContentPart{
 			{Kind: llm.ContentToolCall, ToolCall: &llm.ToolCallData{ID: "ask1", Name: "ask_user", Arguments: askArgs, Type: "function"}},
 		},
-	})); err != nil {
+	}), transcript.RecordOptions{Door: transcript.DoorBuffered}); err != nil {
 		t.Fatalf("append assistant turn: %v", err)
 	}
 	// Deliberately nothing else: the process died before ask_user's tool
@@ -3725,12 +3727,16 @@ func TestAskUser_ShorthandWithIntentSucceeds(t *testing.T) {
 	t.Parallel()
 	sess := newAskTestSession(t, SessionConfig{})
 	var capturedIntent string
-	sess.reg.Use(func(ctx context.Context, name string, args map[string]any) error {
-		if name == "ask_user" {
-			capturedIntent, _ = args["intent"].(string)
-		}
-		return nil
-	})
+	registered := *sess.reg.Get("ask_user")
+	origExec := registered.Exec
+	registered.Execute = nil
+	registered.Exec = func(ctx context.Context, env execenv.ExecutionEnvironment, args map[string]any) (any, error) {
+		capturedIntent = tool.IntentFromContext(ctx)
+		return origExec(ctx, env, args)
+	}
+	if err := sess.reg.Register(registered); err != nil {
+		t.Fatalf("re-register ask_user: %v", err)
+	}
 	args := askUserArgsShorthand()
 	args["intent"] = "clarify datastore choice"
 

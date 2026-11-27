@@ -125,18 +125,12 @@ func readFileLimitHint(err error) error {
 	return fmt.Errorf("%w; %w", rle, errReadFileCapHint)
 }
 
-// ReadFileAndBytesCtx is ReadFileCtx that also returns the whole file's bytes
-// as this read loaded them, for a caller that must record exactly what the
-// read saw. The bytes are the complete file even when offset and limit select
-// only some of its lines — the caller needs the file, not the window — so this
-// entry always loads it; ReadFileCtx, which does not need them, reads the
-// window alone. On error the bytes are nil.
-func (e *LocalExecutionEnvironment) ReadFileAndBytesCtx(ctx context.Context, path string, offsetLine *int, limitLines *int) (string, []byte, error) {
-	out, b, _, err := e.ReadFileRichAndBytesCtx(ctx, path, offsetLine, limitLines)
-	return out, b, err
-}
-
-// ReadFileRichAndBytesCtx is ReadFileAndBytesCtx that also returns structured ReadFileMeta.
+// ReadFileRichAndBytesCtx is ReadFileRichCtx that also returns the whole file's
+// bytes as this read loaded them, for a caller that must record exactly what
+// the read saw. The bytes are the complete file even when offset and limit
+// select only some of its lines (the caller needs the file, not the window),
+// so this entry always loads it; ReadFileCtx and ReadFileRichCtx, which do not
+// need them, read the window alone. On error the bytes are nil.
 func (e *LocalExecutionEnvironment) ReadFileRichAndBytesCtx(ctx context.Context, path string, offsetLine *int, limitLines *int) (string, []byte, ReadFileMeta, error) {
 	t, err := e.fileTarget("read_file", path, targetRead)
 	if err != nil {
@@ -293,24 +287,18 @@ var MaxEditFileOutputBytes int64 = MaxWholeFileReadBytes
 // replaceAll is true, oldString must match exactly once. It returns a summary
 // of the number of replacements made.
 func (e *LocalExecutionEnvironment) EditFile(path string, oldString string, newString string, replaceAll bool) (string, error) {
-	return e.EditFileWithCtx(context.Background(), path, oldString, newString, replaceAll, nil)
+	return e.EditFileCtx(context.Background(), path, oldString, newString, replaceAll)
 }
 
 // EditFileCtx is EditFile with the caller's context threaded to its read, so a
 // cancelled edit ends a read parked on a stream. It is the interface-visible
 // entry of ContextualFileReader.
 func (e *LocalExecutionEnvironment) EditFileCtx(ctx context.Context, path string, oldString string, newString string, replaceAll bool) (string, error) {
-	return e.EditFileWithCtx(ctx, path, oldString, newString, replaceAll, nil)
-}
-
-// EditFileWithCtx is EditFileCtx, except that finish, when not nil, turns the
-// edited bytes into the bytes written, inside the same read and write.
-func (e *LocalExecutionEnvironment) EditFileWithCtx(ctx context.Context, path string, oldString string, newString string, replaceAll bool, finish func(edited []byte) []byte) (string, error) {
 	return e.EditFileBatchWithCtx(ctx, path, []FileEdit{{
 		OldString:  oldString,
 		NewString:  newString,
 		ReplaceAll: replaceAll,
-	}}, finish)
+	}}, nil)
 }
 
 // EditFileBatchCtx applies multiple non-overlapping replacements to path

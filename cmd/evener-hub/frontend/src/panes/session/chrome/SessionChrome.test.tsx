@@ -30,6 +30,8 @@ import { resetThreadsStoreForTests, threadsStore } from "../../../stores/threads
 import { resetTranscriptDisplayStoreForTests, transcriptDisplayStore } from "../../../stores/transcriptDisplay";
 import { escapeRegExp } from "../../../styles/cssBlock";
 import { ALL_CAPABILITIES as CAPABILITIES } from "../../../threadTestUtils";
+import type { SessionZoomParams } from "../../zoom/intent";
+import { LANDSCAPE_PHONE_QUERY } from "../composer/narrowComposer";
 import { resetFindRequestsForTests, useFindRequest } from "../find/findRequest";
 import { settleActivityDiscovery } from "../testing/activityDiscovery";
 import { installMobileViewport } from "../testing/mobileViewport";
@@ -97,9 +99,10 @@ function locationWithSession(ref: string): NavigationSessionLocation {
     },
   };
 }
-function setLocation(ref: string): void {
+function setLocation(ref: string, tasks?: NonNullable<NavigationSessionLocation["session"]>["tasks"]): void {
   const key = { kind: "location", ref } as const;
   const data = locationWithSession(ref);
+  if (data.session && tasks) data.session.tasks = tasks;
   navigationStore.setState({
     mode: "v3",
     clientGenerationID: "generation_test",
@@ -227,18 +230,19 @@ test("composer placement renders one ordered inline status and actions cluster w
   const statusRow = within(cluster).getByTestId("status-row");
   const identity = within(cluster).getByTestId("status-row-identity");
   const context = within(cluster).getByTestId("status-row-context");
+  const modelTrigger = within(identity).getByTestId("model-switch-trigger");
   const actions = within(cluster).getByRole("button", { name: "Session actions" });
-  expect(within(identity).getByTestId("model-switch-trigger")).toBeTruthy();
   expect(within(identity).getByRole("combobox", { name: "Reasoning effort" })).toBeTruthy();
   expect(statusRow.contains(identity)).toBe(true);
-  expect(statusRow.contains(context)).toBe(true);
+  expect(identity.contains(context)).toBe(true);
+  expect(identity.contains(modelTrigger)).toBe(true);
   expect(cluster.children).toHaveLength(2);
   expect(cluster.children[0]).toBe(statusContainer);
   expect(statusContainer.contains(statusRow)).toBe(true);
   expect(statusContainer.contains(actions)).toBe(false);
   expect(cluster.children[1]?.contains(actions)).toBe(true);
-  expect(identity.compareDocumentPosition(context) & Node.DOCUMENT_POSITION_FOLLOWING).not.toBe(0);
-  expect(context.compareDocumentPosition(actions) & Node.DOCUMENT_POSITION_FOLLOWING).not.toBe(0);
+  expect(context.compareDocumentPosition(modelTrigger) & Node.DOCUMENT_POSITION_FOLLOWING).not.toBe(0);
+  expect(identity.compareDocumentPosition(actions) & Node.DOCUMENT_POSITION_FOLLOWING).not.toBe(0);
   expect(screen.getAllByTestId("status-row")).toHaveLength(1);
   expect(screen.getAllByRole("button", { name: "Session actions" })).toHaveLength(1);
   expect(screen.queryByTestId("session-chrome")).toBeNull();
@@ -462,6 +466,125 @@ test("header Overview toggles the session's sidebar and selected state", async (
   expect(overview.getAttribute("aria-pressed")).toBe("false");
 });
 
+test("the phone header pairs Find with Overview opening the tabbed inspector directly on About", async ({
+  onTestFinished,
+}) => {
+  onTestFinished(installMobileViewport());
+  const ref = "local:phone_sheet";
+  const paneId = "pane_phone_sheet";
+  const cwd = "/tmp/overview-project";
+  const branch = "fixture-overview-branch";
+  const link = "https://example.com/docs";
+  const goal = { objective: "Review the recorded fixture", status: "blocked", iterations: 2 };
+  const user = userEvent.setup();
+  const asked = renderHook(() => useFindRequest(ref, paneId));
+  const fake = connectFakeClient();
+  fake.on("evener/git/head", () => ({ head: branch }));
+  fake.on("evener/tasks/list", () => ({ data: [] }));
+  fake.on("thread/read", () =>
+    readResponse(ref, {
+      cwd,
+      evener: {
+        ref,
+        capabilities: CAPABILITIES,
+        queue: { revision: 0 },
+        goal,
+        tasks: { total: 0, done: 0 },
+        sessionUrls: [{ id: "u1", url: link, label: "Example", addedBy: "human", addedAt: 7 }],
+      },
+    }),
+  );
+  workspaceStore.setState({
+    panes: [{ id: paneId, type: "session", params: { ref }, slot: "main" }],
+    focusedPaneId: paneId,
+  });
+  const panes = workspaceStore.getState().panes;
+  await threadsStore.getState().ensureThread(ref);
+  render(
+    <MotionProvider>
+      <SessionInspectionActions sessionRef={ref} paneId={paneId} />
+      <ActivitySidebar mobile />
+    </MotionProvider>,
+  );
+
+  const find = screen.getByRole("button", { name: "Find in session" });
+  const entry = screen.getByRole("button", { name: "Overview" });
+  expect(find.compareDocumentPosition(entry) & Node.DOCUMENT_POSITION_FOLLOWING).not.toBe(0);
+  await user.click(find);
+  expect(asked.result.current?.target).toBe(paneId);
+
+  // Even when a browser suppresses mousedown focus on buttons, clicking
+  // Overview opens the unified sidebar directly on About and restores focus
+  // back to the header trigger on Escape.
+  entry.addEventListener("mousedown", (event) => event.preventDefault());
+  await user.click(entry);
+  const sidebar = await screen.findByTestId("activity-sidebar");
+  expect(screen.getAllByRole("dialog", { name: "Overview" })).toEqual([sidebar]);
+  expect(activitySidebarStore.getState()).toMatchObject({ open: true, ref, tab: "about" });
+  expect(within(sidebar).getByTestId("session-details-model")).toBeTruthy();
+  expect(within(sidebar).getByTestId("session-details-goal").textContent).toContain(goal.objective);
+  expect(within(sidebar).getByTestId("session-details-goal-status").textContent).toBe(goal.status);
+  expect((await within(sidebar).findByTestId("session-details-branch")).textContent).toContain(branch);
+  expect(fake.calls.find((call) => call.method === "evener/git/head")?.params).toEqual({ cwd });
+  await user.click(within(sidebar).getByRole("tab", { name: /^Links/ }));
+  const savedLink = await within(sidebar).findByTestId("about-link-u1");
+  expect(savedLink.getAttribute("href")).toBe(link);
+
+  await user.click(within(sidebar).getByRole("tab", { name: /^Tasks/ }));
+  expect(activitySidebarStore.getState()).toMatchObject({ open: true, ref, tab: "tasks" });
+  await waitFor(() => expect(fake.calls.find((call) => call.method === "evener/tasks/list")?.params).toEqual({ ref }));
+  expect(workspaceStore.getState().panes).toEqual(panes);
+  await user.keyboard("{Escape}");
+  await waitFor(() => expect(document.activeElement).toBe(entry));
+});
+
+test("landscape phone header Overview reaches the current session's goal through About", async ({ onTestFinished }) => {
+  const originalMatchMedia = window.matchMedia;
+  window.matchMedia = vi.fn((query: string) => ({
+    matches: query === LANDSCAPE_PHONE_QUERY,
+    media: query,
+    onchange: null,
+    addListener: () => {},
+    removeListener: () => {},
+    addEventListener: () => {},
+    removeEventListener: () => {},
+    dispatchEvent: () => false,
+  })) as typeof window.matchMedia;
+  onTestFinished(() => {
+    window.matchMedia = originalMatchMedia;
+  });
+
+  const ref = "local:duo_landscape_goal";
+  const paneId = "pane_duo_landscape_goal";
+  const goal = { objective: "Verify Duo landscape goal", status: "blocked", iterations: 1 };
+  const user = userEvent.setup();
+  const fake = connectFakeClient();
+  fake.on("thread/read", () =>
+    readResponse(ref, {
+      evener: { ref, capabilities: CAPABILITIES, queue: { revision: 0 }, goal },
+    }),
+  );
+  workspaceStore.setState({
+    panes: [{ id: paneId, type: "session", params: { ref }, slot: "main" }],
+    focusedPaneId: paneId,
+  });
+  await threadsStore.getState().ensureThread(ref);
+
+  render(
+    <MotionProvider>
+      <SessionInspectionActions sessionRef={ref} paneId={paneId} />
+      <ActivitySidebar />
+    </MotionProvider>,
+  );
+
+  await user.click(screen.getByRole("button", { name: "Overview" }));
+  await user.click(await screen.findByRole("tab", { name: "About" }));
+  const sidebar = screen.getByTestId("activity-sidebar");
+  await within(sidebar).findByTestId("session-details-model");
+  expect(within(sidebar).getByTestId("session-details-goal").textContent).toContain(goal.objective);
+  expect(within(sidebar).getByTestId("session-details-goal-status").textContent).toBe(goal.status);
+});
+
 test("an ordinary session's composer leaves Find and Overview to the header but keeps Verbosity", async () => {
   const user = userEvent.setup();
   const fake = connectFakeClient();
@@ -487,14 +610,32 @@ test("an ordinary session's composer leaves Find and Overview to the header but 
   }
 });
 
-test("a composer without an ordinary session header retains its inspection menu actions", async () => {
+test("a cascade composer keeps Find and Overview through the sessionZoom pane that owns it", async () => {
   const user = userEvent.setup();
   const fake = connectFakeClient();
-  const ref = "ref_composer_without_header";
+  const ref = "ref_cascade_owner";
+  const originRef = "ref_cascade_origin";
   fake.on("thread/read", () => readResponse(ref));
   await threadsStore.getState().ensureThread(ref);
+  // Zoom.tsx hands each cascade column its own sessionZoom pane ID
+  // (ConversationSeat.viewFallbackId), and Composer forwards it to
+  // SessionChrome. An ordinary session pane showing the same conversation
+  // stands beside it: were the explicit owner ignored, the fallback lookup
+  // would find that session pane and the header would take Find and Overview
+  // out of the menu.
+  const cascadeParams: SessionZoomParams = {
+    ref,
+    source: { type: "session", params: { ref: originRef } },
+    edges: [{ ownerRef: originRef, childRef: ref, delegateId: "d1" }],
+  };
+  workspaceStore.setState({
+    panes: [
+      { id: "pane_ordinary_owner", type: "session", params: { ref }, slot: "main" },
+      { id: "pane_cascade_owner", type: "sessionZoom", params: cascadeParams, slot: "secondary" },
+    ],
+  });
 
-  render(<SessionChromeView ref={ref} placement="composer" />);
+  render(<SessionChromeView ref={ref} paneId="pane_cascade_owner" placement="composer" />);
 
   await user.click(screen.getByRole("button", { name: "Session actions" }));
   expect(screen.getByRole("menuitem", { name: "Overview" })).toBeTruthy();
@@ -813,7 +954,7 @@ test("Overview About reads the work time of the SAME ref passed to SessionChrome
   );
   await user.click(screen.getByRole("button", { name: /session actions/i }));
   await user.click(screen.getByRole("menuitem", { name: "Overview" }));
-  await user.click(await screen.findByRole("radio", { name: "About" }));
+  await user.click(await screen.findByRole("tab", { name: "About" }));
 
   expect((await screen.findByTestId("session-details-work-time")).textContent).toContain("2m");
   restoreViewport();
@@ -1059,7 +1200,7 @@ test("mobile chrome opens Overview without changing workspace panes", async () =
     const sidebar = await screen.findByTestId("activity-sidebar");
     await waitFor(() => expect(screen.queryByRole("menu")).toBeNull());
     await waitFor(() => expect(sidebar.contains(document.activeElement)).toBe(true));
-    await user.click(screen.getByRole("radio", { name: "About" }));
+    await user.click(screen.getByRole("tab", { name: "About" }));
     await user.keyboard("{Escape}");
     await waitFor(() => expect(document.activeElement).toBe(screen.getByRole("button", { name: "Session actions" })));
     expect(workspaceStore.getState().panes).toEqual(panes);
@@ -1114,7 +1255,7 @@ test.each(["removed", "hidden ancestor"])(
       await waitFor(() => expect(sidebar.contains(document.activeElement)).toBe(true));
       if (condition === "removed") original.unmount();
       else original.container.style.display = "none";
-      await user.click(screen.getByRole("radio", { name: "About" }));
+      await user.click(screen.getByRole("tab", { name: "About" }));
       await user.keyboard("{Escape}");
       const trigger = within(replacement.container).getByRole("button", { name: "Session actions" });
       await waitFor(() => expect(document.activeElement).toBe(trigger));

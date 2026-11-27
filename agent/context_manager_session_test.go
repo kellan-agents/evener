@@ -272,7 +272,7 @@ func TestBuildCompactionMeta_ExcludesTaskState(t *testing.T) {
 	if _, err := store.Append([]task.TaskInput{{Description: "Frobnicate the gizmo"}}); err != nil {
 		t.Fatalf("Append: %v", err)
 	}
-	if err := store.Update([]task.TaskUpdate{{ID: 1, Status: task.TaskInProgress}}); err != nil {
+	if _, err := store.Update([]task.TaskUpdate{{ID: 1, Status: task.TaskInProgress}}); err != nil {
 		t.Fatalf("Update in_progress: %v", err)
 	}
 
@@ -280,10 +280,6 @@ func TestBuildCompactionMeta_ExcludesTaskState(t *testing.T) {
 	// SessionID should be exactly sess.id — task descriptions must not appear in it.
 	if meta.SessionID != sess.id {
 		t.Fatalf("expected SessionID %q, got %q", sess.id, meta.SessionID)
-	}
-	// ActivatedSkills is never populated by buildCompactionMeta; assert it remains nil.
-	if len(meta.ActivatedSkills) != 0 {
-		t.Fatalf("task state leaked into ActivatedSkills: %v", meta.ActivatedSkills)
 	}
 }
 

@@ -33,7 +33,6 @@ import {
   type NotificationTone,
   type ParsedNotification,
   parseAnsiLines,
-  scopedDisclosureId,
 } from "@evener/appwire-client";
 import { Fragment, type ReactNode } from "react";
 import { useEntityOwnerRef, useEntityViews } from "../../../../transcriptDisplay/entityViews";
@@ -42,10 +41,18 @@ import {
   expandDetailsByDefault,
   useTranscriptRenderContext,
 } from "../../../../transcriptDisplay/renderContext";
-import { Card, Chip, Disclosure, Markdown, MarkdownBubble, ToolIcon, type ToolIconKind } from "../../../../widgets";
-import { AnsiLineContent } from "../../../../widgets/codeblock/ansiLine";
-import { disclosureDefault, isDisclosureOpen, setDisclosureOpen } from "../../../../widgets/disclosure/disclosureStore";
-import { FailureGlyph } from "../../../../widgets/failureglyph";
+import {
+  AnsiLineContent,
+  Card,
+  Chip,
+  Disclosure,
+  FailureGlyph,
+  Markdown,
+  MarkdownBubble,
+  setDisclosureOpen,
+  ToolIcon,
+  type ToolIconKind,
+} from "../../../../widgets";
 import { requireClass } from "../../../../widgets/internal/requireClass";
 import { EntityRef } from "../EntityRef";
 import { OpenTranscriptButton } from "../openTranscript";
@@ -65,6 +72,7 @@ import {
   structuredRowLabel,
   structuredValueText,
 } from "./notificationText";
+import { useTranscriptDisclosure } from "./useTranscriptDisclosure";
 
 const CLASS = {
   collapsible: requireClass(styles.collapsible, "notificationcard.module.css", "collapsible"),
@@ -88,8 +96,6 @@ const CLASS = {
   rawBody: requireClass(styles.rawBody, "notificationcard.module.css", "rawBody"),
   statusIcon: requireClass(styles.statusIcon, "notificationcard.module.css", "statusIcon"),
   statusIconError: requireClass(styles.statusIconError, "notificationcard.module.css", "statusIconError"),
-  summaryIcon: requireClass(styles.summaryIcon, "notificationcard.module.css", "summaryIcon"),
-  summaryIconError: requireClass(styles.summaryIconError, "notificationcard.module.css", "summaryIconError"),
   resultTable: requireClass(styles.resultTable, "notificationcard.module.css", "resultTable"),
   resultKey: requireClass(styles.resultKey, "notificationcard.module.css", "resultKey"),
   resultValue: requireClass(styles.resultValue, "notificationcard.module.css", "resultValue"),
@@ -112,15 +118,46 @@ const STATUS_ICON_KIND: Record<Exclude<NotificationTone, "error">, ToolIconKind>
 // The error tone's presentation decision in one place: the FailureGlyph cross
 // seated at full strength, never the quiet rail's kind icon - the red cross
 // IS the failure signal. Every other tone draws its kind from the table above.
-function statusIconSeat(tone: NotificationTone): { className: string; summaryClassName: string; glyph: ReactNode } {
+function statusIconSeat(tone: NotificationTone): { className: string; glyph: ReactNode } {
   if (tone === "error") {
-    return { className: CLASS.statusIconError, summaryClassName: CLASS.summaryIconError, glyph: <FailureGlyph /> };
+    return { className: CLASS.statusIconError, glyph: <FailureGlyph /> };
   }
   return {
     className: CLASS.statusIcon,
-    summaryClassName: CLASS.summaryIcon,
     glyph: <ToolIcon kind={STATUS_ICON_KIND[tone]} />,
   };
+}
+
+// The card's one head: status glyph in the shared icon rail, the warning chip
+// a warning tone earns, title and secondary line. Both static heads and
+// collapsible Disclosure summaries share this exact head and seat.
+function NotificationHead({
+  tone,
+  title,
+  secondary,
+}: {
+  tone: NotificationTone;
+  title: string;
+  secondary?: ReactNode;
+}) {
+  const seat = statusIconSeat(tone);
+  const showWarningChip = tone === "warning";
+  return (
+    <>
+      <span className={seat.className} data-testid="notification-status-icon" aria-hidden="true">
+        {seat.glyph}
+      </span>
+      {showWarningChip && (
+        <Chip tone="attention" kind="warning">
+          warning
+        </Chip>
+      )}
+      <span className={CLASS.headingText}>
+        <span className={CLASS.title}>{title}</span>
+        {secondary !== undefined && <span className={CLASS.secondary}>{secondary}</span>}
+      </span>
+    </>
+  );
 }
 
 function ExcerptText({ text, ansi }: { text: string; ansi: boolean }) {
@@ -161,15 +198,15 @@ function Field({ label, value, testId }: { label: string; value: ReactNode; test
 // highlights the word. A closed fold is aria-hidden, which is what keeps Find's
 // marking out of words a reader cannot see (<details>'s closed body is hidden
 // to assistive tech and to marking alike).
-function RawNotification({ id, text }: { id: string; text: string }) {
-  const open = isDisclosureOpen(id, false);
+function RawNotification({ scope, id, text }: { scope: string; id: string; text: string }) {
+  const { key, open } = useTranscriptDisclosure({ scope, id, defaultOpen: false });
   return (
     <details
       className={CLASS.raw}
       data-testid="notification-raw-disclosure"
       open={open}
       onToggle={(event) => {
-        if (event.currentTarget.open !== open) setDisclosureOpen(id, event.currentTarget.open);
+        if (event.currentTarget.open !== open) setDisclosureOpen(key, event.currentTarget.open);
       }}
     >
       <summary className={CLASS.summary}>Raw notification</summary>
@@ -335,21 +372,16 @@ export function NotificationCard({
   const entities = useEntityViews();
   const contextOwner = useEntityOwnerRef();
   const entityOwner = sessionRef ?? contextOwner;
-  const { config } = context;
   const disclosureScope = disclosureScopeForSession(context, sessionRef);
   // The card's own identity and its raw frame's, both scoped to this view:
   // Find opens the same keys (notificationText's identity rule).
   const scopedNotificationId = notificationDisclosureId(notification, sessionRef, disclosureId);
-  const disclosureKey = scopedDisclosureId(disclosureScope, scopedNotificationId);
-  const rawKey = scopedDisclosureId(disclosureScope, rawDisclosureId(scopedNotificationId));
-  const disclosureFallback =
-    expandDetailsByDefault(config) || disclosureDefault(disclosureScope, scopedNotificationId, false);
-  // Only warning earns a Chip; success + neutral recede with no chip at all
-  // (the done glyph is the same neutral as any other card). Error announces
-  // itself with the red FailureGlyph in the head's rail seat instead - a
-  // pill reading "error" beside a title that already says "Job failed"
-  // carried nothing the glyph doesn't.
-  const showWarningChip = notification.tone === "warning";
+  const rawNotificationId = rawDisclosureId(scopedNotificationId);
+  const disclosure = useTranscriptDisclosure({
+    scope: disclosureScope,
+    id: scopedNotificationId,
+    defaultOpen: expandDetailsByDefault(context.config),
+  });
   // The head's open affordance is the SUBAGENT control, so only a delegate
   // notification earns it: its transcript_ref, when a frame carries one,
   // names a child session's thread. A job notification is not a subagent
@@ -415,27 +447,6 @@ export function NotificationCard({
       <OpenTranscriptButton transcriptRef={transcriptRef} parentRef={sessionRef} label="Open subagent" />
     </span>
   ) : null;
-  // Seated first in the head, before the chip and title. Decorative - the
-  // title's own words ("Job completed", "Job failed") already name the status
-  // for assistive tech, so exposing the glyph would announce the same fact
-  // twice (the same ruling as every other rail icon and ThinkBlock's bulb) -
-  // which is also why FailureGlyph's own accessible name is silenced by the
-  // aria-hidden seat here, unlike its inline use on failed tool rows where it
-  // is the only failure signal. The static head seats it in the transcript's
-  // icon rail (see notificationcard.module.css's .statusIcon; error's
-  // full-strength variant is .statusIconError); a Disclosure summary sits in
-  // the content column like every Disclosure, so there it takes only the
-  // glyph's own box.
-  const seat = statusIconSeat(notification.tone);
-  const statusIcon = (inSummary: boolean) => (
-    <span
-      className={inSummary ? seat.summaryClassName : seat.className}
-      data-testid="notification-status-icon"
-      aria-hidden="true"
-    >
-      {seat.glyph}
-    </span>
-  );
   // The head's identity for a reader of the DOM: the notification's type,
   // tone and settled outcome, and whether it is a running update.
   const headData = {
@@ -447,29 +458,18 @@ export function NotificationCard({
   };
   if (!delegateHasReport) {
     const delegateName = delegateTrigger(false);
+    // Neither the ending nor the Open control may be gated on the label.
+    const secondary =
+      delegateName !== undefined || notification.secondary !== "" || openControl !== null ? (
+        <>
+          {delegateName !== undefined ? delegateName : notification.secondary}
+          {delegateName !== undefined && delegateEnding ? ` · ${delegateEnding}` : null}
+          {openControl}
+        </>
+      ) : undefined;
     return (
       <div className={CLASS.staticHead} {...headData}>
-        {statusIcon(false)}
-        {showWarningChip && (
-          <Chip tone="attention" kind="warning">
-            warning
-          </Chip>
-        )}
-        <span className={CLASS.headingText}>
-          <span className={CLASS.title}>{notification.title}</span>
-          {/* An unlabeled delegate keeps its ending and Open control: the
-              secondary falls back to the parser's own composition (which
-              already carries the ending) when no name/description/id exists,
-              and the Open control renders wherever a transcript_ref does -
-              neither may be gated on the label. */}
-          {(delegateName !== undefined || notification.secondary !== "" || openControl !== null) && (
-            <span className={CLASS.secondary}>
-              {delegateName !== undefined ? delegateName : notification.secondary}
-              {delegateName !== undefined && delegateEnding ? ` · ${delegateEnding}` : null}
-              {openControl}
-            </span>
-          )}
-        </span>
+        <NotificationHead tone={notification.tone} title={notification.title} secondary={secondary} />
       </div>
     );
   }
@@ -488,22 +488,9 @@ export function NotificationCard({
       <div className={CLASS.disclosure}>
         <Disclosure
           variant="quiet"
-          id={disclosureKey}
-          defaultOpen={disclosureFallback}
-          summary={
-            <>
-              {statusIcon(true)}
-              {showWarningChip && (
-                <Chip tone="attention" kind="warning">
-                  warning
-                </Chip>
-              )}
-              <span className={CLASS.headingText}>
-                <span className={CLASS.title}>{notification.title}</span>
-                {secondary !== undefined && <span className={CLASS.secondary}>{secondary}</span>}
-              </span>
-            </>
-          }
+          id={disclosure.key}
+          defaultOpen={disclosure.fallback}
+          summary={<NotificationHead tone={notification.tone} title={notification.title} secondary={secondary} />}
         >
           <div className={CLASS.expanded}>
             <Card>
@@ -537,7 +524,9 @@ export function NotificationCard({
                 {notification.concerns.length > 0 && (
                   <div className={CLASS.concerns}>Concerns: {notification.concerns.join("; ")}</div>
                 )}
-                {notification.type !== "delegate" && <RawNotification id={rawKey} text={notification.rawText} />}
+                {notification.type !== "delegate" && (
+                  <RawNotification scope={disclosureScope} id={rawNotificationId} text={notification.rawText} />
+                )}
               </div>
             </Card>
           </div>

@@ -3,6 +3,7 @@ import {
 	type EvenerDelegateInfo,
 	isExitOnly,
 	itemIdentityMatches,
+	isQuietYield,
 	MEMORY_CONTEXT_EVENT_KIND,
 	type TurnModel,
 } from "@evener/appwire-client";
@@ -175,7 +176,11 @@ export function TimelineItem({
 	switch (item.kind) {
 		case "details":
 			content = (
-				<SystemEvent label={`Session details · ${item.entries.length}`} expanded={expanded} onToggle={toggle}>
+				<SystemEvent
+					label={item.summary ?? `Session details · ${item.entries.length}`}
+					expanded={expanded}
+					onToggle={toggle}
+				>
 					{item.entries.map((entry) => (
 						<TimelineItem
 							key={entry.id}
@@ -183,8 +188,12 @@ export function TimelineItem({
 							hubId={hubId}
 							sessionRef={sessionRef}
 							sourceTurns={sourceTurns}
+							thinkingOpenByDefault={thinkingOpenByDefault}
+							delegates={delegates}
+							openSubagent={openSubagent}
 							errorActionFor={errorActionFor}
 							onErrorAction={onErrorAction}
+							fileContext={fileContext}
 						/>
 					))}
 				</SystemEvent>
@@ -243,7 +252,14 @@ export function TimelineItem({
 					attention={item.tone === "attention"}
 				/>
 			) : (
-				<SystemEvent label={label} text={noticeText} hint={item.hint} expanded={expanded} onToggle={toggle}>
+				<SystemEvent
+					label={label}
+					text={noticeText}
+					hint={item.hint}
+					expanded={expanded}
+					onToggle={toggle}
+					prose={isQuietYield(item)}
+				>
 					{item.eventKind === MEMORY_CONTEXT_EVENT_KIND ? (
 						<MemoryContextBody
 							observation={item.memoryContext}

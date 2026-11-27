@@ -14,6 +14,7 @@ import (
 
 	"primeradiant.com/evener/agent/mcpconfig"
 	"primeradiant.com/evener/agent/sandbox"
+	"primeradiant.com/evener/agent/sandbox/sandboxtest"
 )
 
 // childEnvChannel decodes the private child-env fd the sandbox attaches to a
@@ -150,7 +151,7 @@ func confinedNpmFixture(t *testing.T) string {
 // worktree-external KUBECONFIG here) is emitted as --unsetenv rather than
 // inherited from the launcher. cfg.Env itself still never joins cmd.Env.
 func TestMCPStdioServerDeliversTheFlooredConfigDelta(t *testing.T) {
-	worktree := sandbox.MaterializeWorkspace(t, sandbox.MainCheckout)
+	worktree := sandboxtest.MaterializeWorkspace(t, sandbox.MainCheckout)
 	sessionTmp := t.TempDir()
 	fixture := confinedNpmFixture(t)
 	// HOME lives beside the fixture, outside /tmp: a home under /tmp would have
@@ -183,7 +184,7 @@ func TestMCPStdioServerDeliversTheFlooredConfigDelta(t *testing.T) {
 	// environment resolves npm's cache to the served ~/.npm, so nothing asks the
 	// floor to redirect it until cfg.Env's userconfig moves npm's effective
 	// cache to the unserved directory.
-	launcherFloor := sandbox.ApplyEnvFloorInDir([]string{"HOME=" + home}, rp, sessionTmp, worktree)
+	launcherFloor := sandbox.ApplyEnvFloor([]string{"HOME=" + home}, rp, sessionTmp, worktree)
 	for _, kv := range launcherFloor {
 		if strings.HasPrefix(kv, "npm_config_cache=") {
 			t.Fatalf("test premise: the launcher's floor already redirects npm_config_cache, so the assignment under test is not derived from cfg.Env: %v", launcherFloor)
@@ -256,7 +257,7 @@ func resolveWrapper(t *testing.T, facts sandbox.HostFacts, cwd, sessionTmp strin
 
 func testWrapper(t *testing.T) *sandbox.Wrapper {
 	t.Helper()
-	cwd := sandbox.MaterializeWorkspace(t, sandbox.MainCheckout)
+	cwd := sandboxtest.MaterializeWorkspace(t, sandbox.MainCheckout)
 	_, w := resolveWrapper(t, sandbox.HostFacts{
 		OS: "linux", Home: t.TempDir(), BwrapPath: "/usr/bin/bwrap", BwrapCapable: true,
 	}, cwd, t.TempDir(), true)
@@ -416,7 +417,7 @@ func TestMCPStdioServerScrubsAmbientSecrets(t *testing.T) {
 
 func testWrapperNetOff(t *testing.T) *sandbox.Wrapper {
 	t.Helper()
-	cwd := sandbox.MaterializeWorkspace(t, sandbox.MainCheckout)
+	cwd := sandboxtest.MaterializeWorkspace(t, sandbox.MainCheckout)
 	_, w := resolveWrapper(t, sandbox.HostFacts{
 		OS: "linux", Home: t.TempDir(), BwrapPath: "/usr/bin/bwrap", BwrapCapable: true,
 	}, cwd, t.TempDir(), false)
@@ -538,7 +539,7 @@ func TestMCPStdioServerDeniesNetworkExceptionUnderNetOff(t *testing.T) {
 // scratch, or an npx-based server writes into read-only storage and can fail to
 // start (#4542 review).
 func TestMCPStdioServerFloorUsesTheConfinedWorktreeDir(t *testing.T) {
-	worktree := sandbox.MaterializeWorkspace(t, sandbox.MainCheckout)
+	worktree := sandboxtest.MaterializeWorkspace(t, sandbox.MainCheckout)
 	packageDir := filepath.Join(worktree, "packages", "foo")
 	packageCache := filepath.Join(t.TempDir(), "package-npm")
 	rootCache := filepath.Join(t.TempDir(), "root-npm")
