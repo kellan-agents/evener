@@ -107,9 +107,10 @@ func (e *bareTextWithoutResultToolError) Is(target error) bool {
 
 // Retry budgets for degenerate model responses within a single input turn.
 const (
-	maxEmptyRetries        = 3
-	maxTotalEmptyResponses = 8 // prevent repeated burst-and-recover spirals
-	maxBareTextRetries     = 3
+	maxEmptyRetries           = 3
+	maxTotalEmptyResponses    = 8 // prevent repeated burst-and-recover spirals
+	maxBareTextRetries        = 3
+	maxTotalBareTextResponses = 8 // prevent repeated burst-and-recover spirals
 	// maxServerContinuations bounds one input turn's run of consecutive
 	// pause_turn responses. A pause is a legitimate protocol continuation, so it
 	// still refunds its tool round (see TestSession_PauseTurn_*), but a provider
@@ -128,12 +129,13 @@ const maxHookStopReasonRunes = 160
 
 // retryTracker counts the degenerate (empty / bare-text) model responses seen so
 // far in one input turn. consecutiveEmpty and consecutiveBareText reset once the
-// model produces tool calls; totalEmpty bounds burst-and-recover spirals across
-// the whole turn.
+// model produces tool calls; totalEmpty and totalBareText bound burst-and-recover
+// spirals across the whole turn.
 type retryTracker struct {
 	consecutiveEmpty    int
 	totalEmpty          int
 	consecutiveBareText int
+	totalBareText       int
 }
 
 // recordAbandonedEnvironmentLocked remembers an environment the swap has just
@@ -1147,6 +1149,14 @@ func delegateEntryRequiresReport(kind EntryKind) bool {
 
 func (s *Session) processOneInput(ctx context.Context, input string, images []ImageAttachment, kind EntryKind, inputProvenance *provenance.Causal) (out string, progressed bool, err error) {
 	communicatePreviewCalls := map[string]struct{}{}
+	// The accepted input's own attachments ride its requests even when the
+	// target row is image-blind, so the provider can refuse them with the
+	// actionable message. Request shaping uses this provenance to tell them
+	// apart from images an earlier vision-capable model accepted (#7629).
+	s.mu.Lock()
+	s.turnInputCarriesImages = len(images) > 0
+	s.turnBaselineCaptured = false
+	s.mu.Unlock()
 	// A speculative document strip that this input never resolves must not
 	// outlive it: cancellation, a round cap, or a recovery branch can exit
 	// before the retry that would commit or roll it back (#4465).
@@ -1833,10 +1843,27 @@ func (s *Session) processOneInput(ctx context.Context, input string, images []Im
 			skipHistory = false
 		}
 
-		bareReply := len(calls) == 0 && !s.reportsToParent() && kind == EntryUserInput &&
-			s.usesDefaultCommunicateOutputEnvelope() && resp.Finish.Reason == llm.FinishReasonStop &&
+		roundCtx := context.WithValue(ctx, communicateEntryKindKey{}, kind)
+		bareTextStop := len(calls) == 0 && resp.Finish.Reason == llm.FinishReasonStop &&
 			!noContent && strings.TrimSpace(lastText) != "" && !s.communicated()
+		var bareReply, bareQuiet bool
+		if bareTextStop {
+			if s.reportsToParent() {
+				drainable, workErr := s.subagentHasDrainableWork()
+				bareReply = s.usesDefaultCommunicateOutputEnvelope() && kind == EntryUserInput &&
+					workErr == nil && !drainable
+				bareQuiet = !bareReply && ((workErr == nil && drainable) ||
+					(kind == EntryDelegateAttention && s.canQuietlyYield(roundCtx) == nil))
+			} else {
+				bareReply = s.usesDefaultCommunicateOutputEnvelope() && kind == EntryUserInput
+				bareQuiet = kind == EntryNotification && s.hasAcceptedTerminalCommunicate()
+			}
+		}
 		var bareStop hooks.StopResult
+		quietCompanion := !bareQuiet && strings.TrimSpace(txt) != "" && s.hasQuietCommunicateCall(calls)
+		if quietCompanion {
+			roundCtx = context.WithValue(roundCtx, communicateCompanionKey{}, &communicateCompanion{text: quietCompanionText(resp.Message.Content)})
+		}
 		if bareReply {
 			bareStop = s.runReplyStopHook(ctx, lastText)
 			if bareStop.Stopped {
@@ -1854,7 +1881,7 @@ func (s *Session) processOneInput(ctx context.Context, input string, images []Im
 			stopErr = s.deliverReplyStopHookContext(bareStop.ModelContext)
 			bareStop.ModelContext = nil
 		}
-		if abortErr := errors.Join(s.emitAssistantResponse(ctx, resp, modelResp, txt, skipHistory, attempt, acceptedBareReply && stopErr == nil), sessionLifecycleFault(ctx, "emit_assistant"), stopErr); abortErr != nil {
+		if abortErr := errors.Join(s.emitAssistantResponse(ctx, resp, modelResp, txt, skipHistory, attempt, acceptedBareReply && stopErr == nil, bareQuiet, quietCompanion), sessionLifecycleFault(ctx, "emit_assistant"), stopErr); abortErr != nil {
 			return "", progressed, abortErr
 		}
 		if googleTerminalSettlement {
@@ -1922,6 +1949,17 @@ func (s *Session) processOneInput(ctx context.Context, input string, images []Im
 			}
 			continue
 		}
+		if bareQuiet {
+			s.beginCommunicateRound()
+			s.recordQuietYield()
+			done, reply, err := s.deliverIfCommunicated(roundCtx, false)
+			if err != nil {
+				return "", progressed, err
+			}
+			if done {
+				return reply, progressed, nil
+			}
+		}
 		if len(calls) == 0 {
 			route := routeNoToolCalls(kind, s.hasAcceptedTerminalCommunicate())
 			if route == finishIdle {
@@ -1952,10 +1990,7 @@ func (s *Session) processOneInput(ctx context.Context, input string, images []Im
 			}
 			return "", progressed, abortErr
 		}
-		s.mu.Lock()
-		s.comm.quietEnd = false
-		s.comm.roundVisible = false
-		s.mu.Unlock()
+		s.beginCommunicateRound()
 
 		// --- Phase: ToolExec ---
 		tPhaseStart = s.sclock().Now()
@@ -1963,7 +1998,7 @@ func (s *Session) processOneInput(ctx context.Context, input string, images []Im
 		// Execute tool calls (possibly in parallel) and send results back.
 		s.noteParentJobActivity(jobPhaseToolRunning)
 		s.beginToolRound()
-		results, execErr := s.execToolBatch(context.WithValue(ctx, communicateEntryKindKey{}, kind), calls, profile, resp.Finish.Reason)
+		results, execErr := s.execToolBatch(roundCtx, calls, profile, resp.Finish.Reason)
 		execErr = errors.Join(execErr, sessionLifecycleFault(ctx, "exec_tools"))
 		if execErr != nil {
 			return "", progressed, execErr
@@ -2067,13 +2102,9 @@ func (s *Session) processOneInput(ctx context.Context, input string, images []Im
 			// A tool post-hook stop yields to a visible reply or a pending ask,
 			// never to a silent quiet yield: let batchBlocked publish and record
 			// its reason instead of settling silently.
-			s.mu.Lock()
-			if s.quietBoundaryLocked() {
-				s.comm.quietEnd = false
-			}
-			s.mu.Unlock()
+			s.clearQuietBoundaryForBatchStop()
 		}
-		done, text, deliverErr := s.deliverIfCommunicated(ctx, askedThisRound)
+		done, text, deliverErr := s.deliverIfCommunicated(roundCtx, askedThisRound)
 		if deliverErr != nil {
 			return "", progressed, deliverErr
 		}
@@ -2447,6 +2478,15 @@ func (s *Session) acceptUserInputWithSkillSelection(ctx context.Context, input s
 			return fmt.Errorf("incorporate claimed user input: %w", err)
 		}
 	}
+	// The opening user turn is durable now, and this capture must precede
+	// UserPromptSubmit: a steer admitted while that hook blocks lands after
+	// this index, so it stays part of the in-flight turn and an image-blind
+	// target keeps its attachments in the first request. Round zero must not
+	// overwrite the boundary with one that already includes that steer.
+	s.mu.Lock()
+	s.turnHistoryBaseline = len(s.history)
+	s.turnBaselineCaptured = true
+	s.mu.Unlock()
 	if queuedIdentity.ClientMutationID == "" {
 		// The direct user turn is durable (or was durably preseeded) at this
 		// point. Earlier admission failures intentionally leave askPending set.

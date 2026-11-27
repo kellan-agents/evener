@@ -37,6 +37,7 @@ import {
   EmptyState,
   Eyebrow,
   InlineNotice,
+  Input,
   ShortcutList,
   type ShortcutListItem,
   Skeleton,
@@ -77,10 +78,7 @@ import { fetchSearch, findInSessionMatches, type HighlightPart, highlightParts, 
 
 const CLASS = {
   palette: requireClass(styles.palette, "commandpalette.module.css", "palette"),
-  pill: requireClass(styles.pill, "commandpalette.module.css", "pill"),
-  pillBack: requireClass(styles.pillBack, "commandpalette.module.css", "pillBack"),
-  input: requireClass(styles.input, "commandpalette.module.css", "input"),
-  error: requireClass(styles.error, "commandpalette.module.css", "error"),
+  commandChip: requireClass(styles.commandChip, "commandpalette.module.css", "commandChip"),
   results: requireClass(styles.results, "commandpalette.module.css", "results"),
   sectionHeader: requireClass(styles.sectionHeader, "commandpalette.module.css", "sectionHeader"),
   row: requireClass(styles.row, "commandpalette.module.css", "row"),
@@ -811,19 +809,15 @@ function PaletteBody({
   return (
     <div className={CLASS.palette}>
       {selectedCommand && (
-        <div className={CLASS.pill}>
-          <span>{selectedCommand.title}</span>
-          <button type="button" className={CLASS.pillBack} aria-label="back to command list" onClick={exitArgsMode}>
-            ×
-          </button>
-        </div>
+        <Chip tone="accent" removeLabel="back to command list" onRemove={exitArgsMode} className={CLASS.commandChip}>
+          {selectedCommand.title}
+        </Chip>
       )}
-      <input
+      <Input
         ref={inputRef}
-        // biome-ignore lint/a11y/noAutofocus: a command palette's whole purpose is an immediately-typable input on open
         autoFocus
-        className={CLASS.input}
-        type="text"
+        fill
+        padding="roomy"
         role="combobox"
         aria-label="Command palette"
         aria-expanded="true"
@@ -845,11 +839,7 @@ function PaletteBody({
         }}
         onKeyDown={onKeyDown}
       />
-      {error && (
-        <div className={CLASS.error} role="alert">
-          <Chip tone="danger">{error}</Chip>
-        </div>
-      )}
+      {error && <InlineNotice tone="danger">{error}</InlineNotice>}
       <div className={CLASS.results} id="palette-results" role="listbox" aria-label="Palette results">
         {renderResults({
           mode,

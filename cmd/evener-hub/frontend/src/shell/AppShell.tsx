@@ -44,6 +44,8 @@ import { DockRegion } from "./DockRegion";
 import { focusedSessionPaneId, focusedSessionRef, modalOpenInFocusedWindows } from "./focusedSession";
 import { HoldHints } from "./holdhints/HoldHints";
 import { installKeybindings } from "./installKeybindings";
+import { connectIPhoneGlass } from "./iPhoneGlass";
+import { connectIPhoneHost, tellIPhoneHost } from "./iPhoneHost";
 import { createLiveSessionController } from "./liveSessionController";
 import { StackHost } from "./mobile/StackHost";
 import { NeedsYouProvider, useNeedsYou } from "./NeedsYouProvider";
@@ -52,7 +54,15 @@ import { CommandPalette } from "./palette/CommandPalette";
 import { openPalette, paletteStore } from "./palette/paletteController";
 import { RailHost } from "./rail";
 import { liveCycleRefs } from "./rail/liveBands";
-import { isAppDrivenNavigation, navigate, observeRouteHistory, openSessionRoute, refParam, urlToPane } from "./routing";
+import {
+  isAppDrivenNavigation,
+  navigate,
+  observeRouteHistory,
+  openSessionRoute,
+  refParam,
+  sameParams,
+  urlToPane,
+} from "./routing";
 import { cycleSessionPane } from "./sessionCycle";
 import {
   consumeRoutedSessionFocus,
@@ -86,7 +96,7 @@ import "../panes/doc"; // registers the "doc" pane type
 import "../panes/transcript"; // registers the "transcript" pane type
 import "../panes/zoom"; // registers the "sessionZoom" pane type
 import "../panes/sessionPanels"; // registers the session panel pane types
-import { initPrefs } from "../stores/prefs";
+import { initPrefs, useResolvedScheme } from "../stores/prefs";
 
 // Apply persisted display preferences (theme/density/font-size) during
 // module evaluation - before first paint - so a saved theme never flashes
@@ -186,10 +196,6 @@ function usePathname(interactiveNavigation: MutableRefObject<string | null>): re
   return [pathname, historyRevision];
 }
 
-function sameRouteParams(a: unknown, b: unknown): boolean {
-  return JSON.stringify(a) === JSON.stringify(b);
-}
-
 // focusedSessionRef lives in ./focusedSession now, shared with the activity
 // surfaces: the ref of the focused pane, but ONLY when that pane IS a session
 // pane (never a session panel, a doc, settings, ...) - Mod+I's own "no-op
@@ -225,14 +231,13 @@ function routePlacementIsApplied(
     if (workspace.focusedPaneId !== main.id) return false;
     const matchingType = route.type;
     const matchingPanes = panes.filter((pane) => pane.type === matchingType);
-    return main.type === matchingType && sameRouteParams(main.params, route.params) && matchingPanes.length === 1;
+    return main.type === matchingType && sameParams(main.params, route.params) && matchingPanes.length === 1;
   }
 
   const ref = refParam(route.params);
   if (ref === null) return false;
   const sessionRefOf = (pane: { params: unknown }): string | null => {
-    const paneRef = (pane.params as { ref?: unknown }).ref;
-    return typeof paneRef === "string" ? paneRef : null;
+    return refParam(pane.params);
   };
   if (location === null) {
     if (locationGone) return main.type === "welcome";
@@ -502,8 +507,12 @@ function AppShellContent({ client: injectedClient, bannerDelayMs, bannerCreateCl
     ];
     function onClick(event: MouseEvent): void {
       const target = event.target as Element | null;
-      if (target?.closest("[data-search-trigger]")) {
+      const trigger = target?.closest("[data-search-trigger]");
+      if (trigger) {
         event.preventDefault();
+        if (trigger instanceof HTMLElement && trigger.ownerDocument.activeElement !== trigger) {
+          trigger.focus({ preventScroll: true });
+        }
         openPalette();
       }
     }
@@ -517,6 +526,12 @@ function AppShellContent({ client: injectedClient, bannerDelayMs, bannerCreateCl
   const connectionState = useConnectionStore((s) => s.state);
   const interactiveNavigationRef = useRef<string | null>(null);
   const [pathname, historyRevision] = usePathname(interactiveNavigationRef);
+  const scheme = useResolvedScheme();
+  useEffect(connectIPhoneHost, []);
+  useEffect(connectIPhoneGlass, []);
+  useEffect(() => tellIPhoneHost({ type: "appearance", dark: scheme === "dark" }), [scheme]);
+  const hubPath = pathname + window.location.search + window.location.hash;
+  useEffect(() => tellIPhoneHost({ type: "route", path: hubPath }), [hubPath]);
   const route = urlToPane(pathname);
   const sessionRouteRef = route?.type === "session" ? refParam(route.params) : null;
   const restoredSessionRef = route?.type === "welcome" ? refParam(workspaceStore.getState().mainPane()?.params) : null;
@@ -644,8 +659,8 @@ function AppShellContent({ client: injectedClient, bannerDelayMs, bannerCreateCl
       registry.registerAction(ACTIONS.sessionPrevious, () => cycleSessionPane("previous")),
       // Live-session navigation: unlike session.next/previous (pane focus),
       // these open the adjacent session from the rail's live section in
-      // server order, wrapping. openNeedsYouSession is the shared
-      // session-URL navigation seam (needsYouCycle.ts).
+      // server order, wrapping. openAttentionSession is the shared
+      // session-URL navigation seam (attentionHistory.ts).
       registry.registerAction(ACTIONS.sessionLiveNext, () => liveSessions.next()),
       registry.registerAction(ACTIONS.sessionLivePrevious, () => liveSessions.previous()),
       registry.registerAction(ACTIONS.settingsOpen, () => navigate("/settings")),
@@ -929,7 +944,12 @@ function AppShellContent({ client: injectedClient, bannerDelayMs, bannerCreateCl
   return (
     <ClientProvider client={client}>
       <MotionProvider>
-        <div className={styles.shell} data-single-pane={singlePane ? "" : undefined}>
+        <div
+          className={styles.shell}
+          data-mobile={isMobile ? "" : undefined}
+          data-desktop-workspace={isMobile ? undefined : ""}
+          data-single-pane={singlePane ? "" : undefined}
+        >
           <ConnectionBanner
             state={connectionState}
             delayMs={bannerDelayMs}
@@ -937,7 +957,6 @@ function AppShellContent({ client: injectedClient, bannerDelayMs, bannerCreateCl
             onClientReplaced={onClientReplaced}
           />
           <ToastRegion />
-          <CommandPalette />
           {/* The cheatsheet overlay and the hold-modifier hints (Phase 4a):
             desktop-only, so on a touch viewport no cheatsheet action is ever
             registered and its trigger chords stay inert - RailHost's
@@ -973,6 +992,10 @@ function AppShellContent({ client: injectedClient, bannerDelayMs, bannerCreateCl
               StackHost mounts the same surface as its full-screen overlay. */}
             {viewportReady && !isMobile && route !== null && <ActivitySidebar />}
           </div>
+          {/* Render after CheatsheetOverlay and .content so the palette's
+            --z-dialog scrim paints above open drawers and modals while staying
+            below --z-toast. */}
+          <CommandPalette />
         </div>
       </MotionProvider>
     </ClientProvider>

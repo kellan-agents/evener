@@ -222,7 +222,7 @@ func TestSubagentStop_ContinueFalseEndsTheRunWithNoContinuation(t *testing.T) {
 	// The child reported on an earlier turn. The hook ended THIS run, so the
 	// terminal packet must carry the hook's reason, not the stale report.
 	subSess.mu.Lock()
-	subSess.comm.called = true
+	subSess.comm.phase = commBoundarySettled
 	subSess.comm.reply = "the earlier report"
 	subSess.mu.Unlock()
 	finish := sub.buildDelegateFinish(got, nil)
@@ -512,7 +512,7 @@ func TestPostToolHooks_ContinueFalseOnQuietYieldPublishesReason(t *testing.T) {
 				if round > 0 {
 					t.Fatalf("%s continue:false must end the turn; reached request %d", event, round)
 				}
-				return quietYieldResponse("quiet-0", `{}`)
+				return quietYieldResponse("quiet-0", `{"message":"no action needed","next":"log_quietly_and_end_turn"}`)
 			})
 			warnings := collectWarnings(sess)
 			enqueueCompletedJobNotification(t, sess, "finished-job")

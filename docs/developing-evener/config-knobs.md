@@ -34,7 +34,7 @@ packages and test files do not count.
 | `EVENER_HUB_LISTEN_ADDR` | public | [developing-evener/environment.md](../developing-evener/environment.md) | `cmd/evener-hub`, `scripts/ops/deploy-hub-endpoint-test.sh` |
 | `EVENER_HUB_SPAWNED` | internal | [developing-evener/environment.md](../developing-evener/environment.md) | `cmd/evener` |
 | `EVENER_HUB_TOKEN` | internal | [developing-evener/environment.md](../developing-evener/environment.md) | `cmd/evener` |
-| `EVENER_HUB_URL` | public | [developing-evener/environment.md](../developing-evener/environment.md) | `cmd/evener-hub`, `cmd/evener-hub/frontend/scripts/backgroundtranscriptguard/run.mjs`, `cmd/evener-hub/frontend/vite.config.ts` |
+| `EVENER_HUB_URL` | public | [developing-evener/environment.md](../developing-evener/environment.md) | `cmd/evener-hub`, `cmd/evener-hub/frontend/scripts/backgroundtranscriptguard/run.mjs`, `cmd/evener-hub/frontend/scripts/warmreturntranscriptguard/run.mjs` and 1 more |
 | `EVENER_LOGIN_HEADLESS` | public | [developing-evener/environment.md](../developing-evener/environment.md) | `cmd/evener` |
 | `EVENER_MODEL` | public | [developing-evener/environment.md](../developing-evener/environment.md) | `cmd/evener`, `cmd/evener-hub/internal/launchconfig`, `cmd/llmcall` and 2 more |
 | `EVENER_NO_USER_SKILLS` | tooling | [developing-evener/environment.md](../developing-evener/environment.md) | `agent`, `agent/mcpconfig`, `agent/plugin` and 1 more |
@@ -58,6 +58,7 @@ packages and test files do not count.
 | `OPENAI_API_KEY` | public | [developing-evener/environment.md](../developing-evener/environment.md) | `auth/openai`, `cmd/evener`, `cmd/evener-hub` and 2 more |
 | `OPENAI_BASE_URL` | public | [developing-evener/environment.md](../developing-evener/environment.md) | `llm/registry` |
 | `OPENAI_CODEX_BASE_URL` | public | [developing-evener/environment.md](../developing-evener/environment.md) | `llm/registry` |
+| `GITHUB_COPILOT_BASE_URL` | public | [environment-variables.md](../environment-variables.md) | `llm/registry` |
 | `OPENAI_ORG_ID` | public | [developing-evener/environment.md](../developing-evener/environment.md) | `llm/registry` |
 | `OPENAI_PROJECT_ID` | public | [developing-evener/environment.md](../developing-evener/environment.md) | `llm/registry` |
 | `ANTHROPIC_API_KEY` | public | [developing-evener/environment.md](../developing-evener/environment.md) | `cmd/evener`, `cmd/evener-hub`, `llm/registry` |
@@ -120,7 +121,7 @@ packages and test files do not count.
 | `GOGC` | inherited | [developing-evener/environment.md](../developing-evener/environment.md) | `cmd/evener` |
 | `GOMODCACHE` | inherited | [developing-evener/environment.md](../developing-evener/environment.md) | `agent`, `agent/execenv`, `agent/sandbox` |
 | `GOPATH` | inherited | [developing-evener/environment.md](../developing-evener/environment.md) | `agent/execenv`, `agent/sandbox`, `scripts/lib/private-go-home.sh` |
-| `HOME` | inherited | [developing-evener/environment.md](../developing-evener/environment.md) | `agent/execenv`, `agent/sandbox`, `appwire-client/typescript/pathRows.ts` and 20 more |
+| `HOME` | inherited | [developing-evener/environment.md](../developing-evener/environment.md) | `agent/execenv`, `agent/sandbox`, `appwire-client/typescript/pathRows.ts` and 19 more |
 | `LANG` | inherited | [developing-evener/environment.md](../developing-evener/environment.md) | `agent/execenv` |
 | `NVM_DIR` | inherited | [developing-evener/environment.md](../developing-evener/environment.md) | `agent/execenv` |
 | `PATH` | inherited | [developing-evener/environment.md](../developing-evener/environment.md) | `agent/execenv`, `agent/sandbox`, `scripts/gate/test-timing-budget.sh` and 1 more |
@@ -162,7 +163,7 @@ Dev tooling and test rigs declare these themselves.
 
 ## hub.toml keys
 
-Scalar keys only; the `[[hosts]]` and `[[providers]]` tables and the
+Scalar keys only; the `[[hosts]]` table and the
 machine-managed host records are described in [the hub guide](../evener-hub.md).
 
 | Key | Default | Doc row | Consumer |

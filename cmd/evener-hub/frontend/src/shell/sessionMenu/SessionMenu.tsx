@@ -24,12 +24,12 @@
 
 import type { NavigationSessionSummary } from "@evener/appwire-client";
 import { type ChangeEvent, useEffect, useState } from "react";
-import { Button, Dialog, FormRow, Input, Menu, type MenuEntry } from "../../widgets";
-import { requireClass } from "../../widgets/internal/requireClass";
+import { Button, ConfirmDialog, Dialog, FormRow, Input, Menu, type MenuEntry } from "../../widgets";
 import { PinSectionPicker } from "../rail/PinSectionPicker";
+import { MoreIcon } from "../rail/railIcons";
 import { isTopLevelSession } from "../rail/sessionKind";
+import { useAsyncConfirm } from "../useAsyncConfirm";
 import { ForceStopDialog } from "./ForceStopDialog";
-import styles from "./sessionmenu.module.css";
 
 export type PinTarget = { section_id: string } | { section_name: string };
 export interface NavigationSessionModel {
@@ -100,10 +100,6 @@ export interface SessionMenuProps {
   onDialogOpenChange?: (open: boolean) => void;
 }
 
-const CLASS = {
-  body: requireClass(styles.body, "sessionmenu.module.css", "body"),
-};
-
 const checked = (label: string, open: boolean) => (open ? `${label} ✓` : label);
 
 export function SessionMenu({
@@ -126,7 +122,7 @@ export function SessionMenu({
   triggerTabIndex,
   onDialogOpenChange,
 }: SessionMenuProps) {
-  const [busy, setBusy] = useState(false);
+  const { busy, run } = useAsyncConfirm();
   const [renameOpen, setRenameOpen] = useState(false);
   const [renameValue, setRenameValue] = useState("");
   const [shutdownOpen, setShutdownOpen] = useState(false);
@@ -143,21 +139,6 @@ export function SessionMenu({
     onDialogOpenChange(true);
     return () => onDialogOpenChange(false);
   }, [dialogOpen, onDialogOpenChange]);
-
-  // confirm runs a dialog-confirmed action: busy-lock the confirm button
-  // against double-submit, close ONLY on success (a rejection was already
-  // toasted by the adapter - see the header comment).
-  async function confirm(action: () => Promise<void>, close: () => void) {
-    setBusy(true);
-    try {
-      await action();
-      close();
-    } catch {
-      // adapter toasted; leave the dialog open
-    } finally {
-      setBusy(false);
-    }
-  }
 
   // Organization actions are decisions about a top-level navigation row;
   // nested and remote rows retain the exact legacy restrictions.
@@ -198,12 +179,12 @@ export function SessionMenu({
   if (organizationEligible) {
     organizeItems.push(
       sessionModel?.pin_section_id
-        ? { id: "unpin", label: "Unpin", onSelect: () => void confirm(actions.onUnpin, () => undefined) }
+        ? { id: "unpin", label: "Unpin", onSelect: () => void actions.onUnpin().catch(() => undefined) }
         : { id: "pin", label: "Pin this session…", onSelect: () => setPickerOpen(true) },
       {
         id: "archive",
         label: sessionModel?.tier === "archived" ? "Unarchive" : "Archive",
-        onSelect: () => void confirm(actions.onToggleArchive, () => undefined),
+        onSelect: () => void actions.onToggleArchive().catch(() => undefined),
       },
     );
   }
@@ -260,7 +241,7 @@ export function SessionMenu({
         triggerTabIndex={triggerTabIndex}
         icon={
           <span data-session-actions-ref={sessionRef} data-pane-id={paneId}>
-            ⋯
+            <MoreIcon />
           </span>
         }
         label={triggerLabel}
@@ -279,7 +260,7 @@ export function SessionMenu({
             <Button
               variant="primary"
               onClick={() =>
-                void confirm(
+                void run(
                   () => actions.onRename(renameValue.trim()),
                   () => setRenameOpen(false),
                 )
@@ -300,59 +281,35 @@ export function SessionMenu({
         </FormRow>
       </Dialog>
 
-      <Dialog
+      <ConfirmDialog
         open={shutdownOpen}
-        onClose={() => setShutdownOpen(false)}
         title="Shut down this session?"
-        footer={
-          <>
-            <Button variant="quiet" onClick={() => setShutdownOpen(false)}>
-              Cancel
-            </Button>
-            <Button
-              variant="danger"
-              onClick={() => void confirm(actions.onShutdown, () => setShutdownOpen(false))}
-              disabled={busy}
-            >
-              Shut down
-            </Button>
-          </>
-        }
+        confirmLabel="Shut down"
+        busy={busy}
+        onConfirm={() => void run(actions.onShutdown, () => setShutdownOpen(false))}
+        onCancel={() => setShutdownOpen(false)}
       >
-        <p className={CLASS.body}>
-          The agent process for this session will stop. You can still read the transcript afterward.
-        </p>
-      </Dialog>
+        <p>The agent process for this session will stop. You can still read the transcript afterward.</p>
+      </ConfirmDialog>
 
       {actions.onForceStop && (
         <ForceStopDialog open={forceStopOpen} onClose={() => setForceStopOpen(false)} onConfirm={actions.onForceStop} />
       )}
 
-      <Dialog
+      <ConfirmDialog
         open={deleteOpen}
-        onClose={() => setDeleteOpen(false)}
         title="Delete session?"
-        footer={
-          <>
-            <Button variant="quiet" onClick={() => setDeleteOpen(false)}>
-              Cancel
-            </Button>
-            <Button
-              variant="danger"
-              onClick={() => void confirm(actions.onDelete, () => setDeleteOpen(false))}
-              disabled={busy}
-            >
-              Delete
-            </Button>
-          </>
-        }
+        confirmLabel="Delete"
+        busy={busy}
+        onConfirm={() => void run(actions.onDelete, () => setDeleteOpen(false))}
+        onCancel={() => setDeleteOpen(false)}
       >
-        <p className={CLASS.body}>Permanently delete "{title}"? This removes its transcript and cannot be undone.</p>
-      </Dialog>
+        <p>Permanently delete "{title}"? This removes its transcript and cannot be undone.</p>
+      </ConfirmDialog>
 
       {/* The picker reports its own assign errors inline; SessionMenu closes
           it only once onPin resolves - the same close-on-success contract as
-          the `confirm` helper above. */}
+          the async-confirm hook above. */}
       {pickerOpen && sessionModel && (
         <PinSectionPicker
           session={sessionModel as never}

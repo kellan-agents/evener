@@ -301,17 +301,18 @@ func appendProjectedEntry(acc *logicalTurnAccumulator, project EntryProjector, t
 		// and a NOTICE there — so project it and attach what it shows to the
 		// turn it names. A completion or reopen names its turn's status.
 		if project != nil && turn.TurnID != "" {
-			if items := project(turn, turn.TurnID, entryIndex); len(items) > 0 {
-				for i := len(acc.turns) - 1; i >= 0; i-- {
-					if acc.turns[i].turnID != turn.TurnID {
-						continue
-					}
+			items := project(turn, turn.TurnID, entryIndex)
+			for i := len(acc.turns) - 1; i >= 0; i-- {
+				if acc.turns[i].turnID != turn.TurnID {
+					continue
+				}
+				if len(items) > 0 {
 					acc.turns[i].items = append(acc.turns[i].items, items...)
 					for range items {
 						acc.turns[i].itemEntries = append(acc.turns[i].itemEntries, entryIndex)
 					}
-					break
 				}
+				break
 			}
 		}
 		if turn.Kind == schema.TurnCompletion && turn.Format == schema.TurnFormatIdentity && turn.TurnID != "" {

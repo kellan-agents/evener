@@ -373,10 +373,14 @@ func skillInvocationAllowed(route string, controls skill.InvocationControls, aut
 // cannot follow. Fresh activation and resumed delivery share it so the code and
 // message cannot drift between the two paths.
 func unavailableSkillActivationError(invocation skillInvocation, canonicalName string) error {
+	need := "tools"
+	if canonicalName == gardeningMemorySkillName {
+		need = "the memory save tools"
+	}
 	return &skillActivationError{
 		Invocation: invocation,
 		Code:       "policy_denied",
-		Err:        fmt.Errorf("skill %q needs the memory save tools this session does not have", canonicalName),
+		Err:        fmt.Errorf("skill %q needs %s this session does not have", canonicalName, need),
 	}
 }
 
@@ -561,7 +565,7 @@ func (s *Session) admitSkillActivationBatch(batch *skillActivationBatch) error {
 			Identity:         identity,
 			Status:           "pending",
 		}
-		carrier := schema.NewTurn(schema.TurnSystem, llm.User(item.Rendered.Content))
+		carrier := schema.NewTurn(schema.TurnSystem, llm.UserMachinery(item.Rendered.Content))
 		carrier.SkillState = &schema.SkillTurnState{
 			Outcomes:    []schema.SkillActivationOutcome{outcome},
 			Obligations: []schema.SkillDeliveryObligation{obligation},

@@ -37,8 +37,23 @@
 // restored anywhere. A reload lands wherever the URL says (see the URL-
 // sync effect below), the same as any other fresh navigation - there is no
 // separate "last mobile screen" memory to restore independently of that.
-import { type ReactNode, Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { SessionInspectionActions } from "../../panes/session/chrome/SessionInspectionActions";
+import {
+  type CSSProperties,
+  createContext,
+  type ReactNode,
+  type RefObject,
+  Suspense,
+  useCallback,
+  useContext,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
+import { AnimatePresence, m, spatialExitTransition, spatialTransition, useReducedMotion } from "../../motion";
+import { openSessionOverview, SessionInspectionActions } from "../../panes/session/chrome/SessionInspectionActions";
+import { requestFindInSession } from "../../panes/session/find/findRequest";
 import { returnFromAgentCascade } from "../../panes/zoom/actions";
 import { isCascadeReturnedOrigin } from "../../panes/zoom/inspectionOrigin";
 import { parseZoomParams } from "../../panes/zoom/intent";
@@ -47,17 +62,44 @@ import {
   registerConversationHostVisibility,
   restrictConversationHandoff,
 } from "../../stores/conversationClaimHandoff";
+import { selectNeedsYouCount } from "../../stores/navigation/selectors";
+import { type NavigationStoreState, useNavigationStore } from "../../stores/navigation/store";
+import {
+  clampSidebarWidth,
+  type FontSizePref,
+  prefsStore,
+  SIDEBAR_WIDTH_MAX,
+  SIDEBAR_WIDTH_MIN_TOUCH,
+  usePrefsStore,
+} from "../../stores/prefs";
+import { useTopNotesExpanded } from "../../stores/topNotes";
 import { Chevron, IconButton } from "../../widgets";
 import { ActivitySidebar } from "../activitybar/ActivitySidebar";
 import { useActivitySidebarStore } from "../activitybar/activitySidebarStore";
 import { attentionEntryOwnsReader, goBackInAttentionHistory, publishFocusedPaneURL } from "../attentionHistory";
 import { ConversationHandoffBoundary } from "../ConversationHandoffBoundary";
 import { useChromeStore } from "../chromeStore";
+import {
+  hasIPhoneSessionHeader,
+  hasIPhoneWorkspaceControls,
+  tellIPhoneHost,
+  useIPhoneEdgeToolbar,
+} from "../iPhoneHost";
 import { paneFor } from "../paneRegistry";
 import { PaneVisibilityContext } from "../paneVisibility";
+import { RAIL_WIDTH_PROPERTY, RailResizeHandle } from "../rail/RailResizeHandle";
+import { RailHeaderActionProvider } from "../rail/railHeaderAction";
+import { SidebarIcon } from "../rail/railIcons";
 import { navigate, paneToURL, refParam, urlToPane } from "../routing";
 import { openSessionByRef } from "../sessionPlacement";
 import { isSinglePaneRoute } from "../singlePane";
+import {
+  isHomeScreenWindow,
+  TABLET_QUERY,
+  useHomeScreenEdge,
+  useMediaQuery,
+  useWorkspaceViewportWidth,
+} from "../useIsMobile";
 import {
   conversationOpenParentRef,
   documentPaneState,
@@ -67,6 +109,7 @@ import {
   useWorkspaceStore,
   workspaceStore,
 } from "../workspace";
+import { IPhoneSessionHeader } from "./IPhoneSessionHeader";
 import { MobilePanel } from "./MobilePanel";
 import styles from "./StackHost.module.css";
 import {
@@ -82,6 +125,93 @@ const TRANSITION_CLASSES = {
   leavingUnder: styles.leavingUnder ?? "",
   leavingOver: styles.leavingOver ?? "",
 };
+
+// Floating-header thresholds (docs/web-ui/design-system.md §12): collapse
+// once a session-family pane's body scrolls past 48px going down; reveal on
+// an 8px upward step or at the very top.
+const FLOAT_COLLAPSE_PAST = 48;
+const FLOAT_REVEAL_STEP = 8;
+const FLOAT_REVEAL_AT_TOP = 12;
+// Only a session-family pane's primary reading scroll port (the VirtualList
+// root directly inside a reading scroll host) drives the floating header;
+// nested scrollers like composer menus and escalation rails stay independent.
+const READING_SCROLLER_SELECTOR = "[data-reading-scroll-host] > *";
+
+// Elastic overscroll pushes scrollTop outside [0, maxScrollTop], and the
+// rebound moves in the opposite direction while still out of bounds. Clamping
+// keeps overscroll and its rebound position-neutral so neither flips the top
+// bar; unmeasured jsdom boxes report zero for both heights and clamp only at 0.
+function clampedScrollTop(scroller: Element): number {
+  const top = scroller.scrollTop;
+  const scrollHeight = scroller.scrollHeight;
+  const clientHeight = scroller.clientHeight;
+  if (scrollHeight <= 0 && clientHeight <= 0) return Math.max(0, top);
+  return Math.max(0, Math.min(top, Math.max(0, scrollHeight - clientHeight)));
+}
+
+// The header uses full touch targets for every pointer in the tablet band.
+const BOARD_MIN_WIDTH = SIDEBAR_WIDTH_MIN_TOUCH;
+// Leave room for the Find query and its clear button beside the match controls.
+const READER_MIN_WIDTH: Record<FontSizePref, number> = { s: 392, m: 392, l: 408, xl: 432 };
+
+const BoardPresentContext = createContext(true);
+
+// The tablet persistent board column. AnimatePresence keeps an exiting element
+// mounted on its previous props until the left-edge slide completes, so reading
+// presence from context makes the leaving column inert and yields the single
+// Board toggle immediately on collapse.
+function TabletBoardColumn({
+  boardRef,
+  boardWidth,
+  boardMaxWidth,
+  boardToggle,
+  railSlot,
+  transition,
+  exitTransition,
+  onBoardInput,
+}: {
+  boardRef: RefObject<HTMLElement | null>;
+  boardWidth: number;
+  boardMaxWidth: number;
+  boardToggle: ReactNode;
+  railSlot: ReactNode;
+  transition: ReturnType<typeof spatialTransition>;
+  exitTransition: ReturnType<typeof spatialExitTransition>;
+  onBoardInput: () => void;
+}) {
+  const present = useContext(BoardPresentContext);
+  const reducedMotion = useReducedMotion() === true;
+  const [opening, setOpening] = useState(false);
+  return (
+    <m.aside
+      className={styles.boardColumn}
+      data-testid="board-column"
+      data-motion={!present ? "closing" : opening ? "opening" : undefined}
+      inert={!present}
+      aria-hidden={present ? undefined : true}
+      ref={present ? boardRef : undefined}
+      initial={reducedMotion ? false : { x: "-100%" }}
+      animate={{ x: 0 }}
+      exit={reducedMotion ? undefined : { x: "-100%", transition: exitTransition }}
+      transition={transition}
+      onAnimationStart={() => setOpening(true)}
+      onAnimationComplete={() => setOpening(false)}
+      onPointerDownCapture={present ? onBoardInput : undefined}
+      onKeyDownCapture={present ? onBoardInput : undefined}
+      onClickCapture={present ? onBoardInput : undefined}
+      style={{ [RAIL_WIDTH_PROPERTY]: `${boardWidth}px` } as CSSProperties}
+    >
+      <RailHeaderActionProvider value={present ? boardToggle : null}>{railSlot}</RailHeaderActionProvider>
+      <RailResizeHandle
+        width={boardWidth}
+        minWidth={BOARD_MIN_WIDTH}
+        maxWidth={boardMaxWidth}
+        onCommit={(width) => prefsStore.getState().setSidebarWidth(width)}
+        railRef={boardRef}
+      />
+    </m.aside>
+  );
+}
 
 // Renders exactly one pane, full-screen: whichever OpenPaneRecord
 // useWorkspaceStore currently reports as focused. Uses the SAME registry
@@ -150,7 +280,7 @@ function attentionEntryOwnsPane(pane: OpenPaneRecord | null | undefined): boolea
   if (!pane) return false;
   const readerRef =
     pane.type === "session"
-      ? (pane.params as { ref?: unknown }).ref
+      ? refParam(pane.params)
       : pane.type === "sessionZoom"
         ? parseZoomParams(pane.params)?.ref
         : null;
@@ -250,6 +380,70 @@ export function StackHost({ railSlot, routeDeferred = false, singlePane = false 
   const activityOpen = useActivitySidebarStore((s) => s.open);
   const [panelOpen, setPanelOpen] = useState(false);
   const closePanel = useCallback(() => setPanelOpen(false), []);
+  // The floating top bar (docs/web-ui/design-system.md §12): true while a
+  // session-family pane's body is scrolled down, trading the solid bar for
+  // floating control capsules. The state is a paint-only class flip - the
+  // bar keeps its box and padding, so the controls never move.
+  const [topBarCollapsed, setTopBarCollapsed] = useState(false);
+  const [nativeFindOpen, setNativeFindOpen] = useState(false);
+  const fontSize = usePrefsStore((s) => s.fontSize);
+  const viewportWidth = useWorkspaceViewportWidth();
+  const tabletViewport = useMediaQuery(TABLET_QUERY);
+  const roomForHostedBoard = useMediaQuery(
+    `(min-width: ${BOARD_MIN_WIDTH + READER_MIN_WIDTH[fontSize]}px) and (min-height: 600px)`,
+  );
+  const homeScreenEdge = useHomeScreenEdge();
+  const hosted = hasIPhoneSessionHeader();
+  const edgeToolbar = useIPhoneEdgeToolbar();
+  const tabletBand =
+    tabletViewport ||
+    ((hosted || isHomeScreenWindow()) &&
+      roomForHostedBoard &&
+      viewportWidth >= BOARD_MIN_WIDTH + READER_MIN_WIDTH[fontSize]);
+  const tabletSplit = tabletBand && !singlePane;
+  const [boardCollapsed, setBoardCollapsed] = useState(false);
+  const boardVisible = tabletSplit && !boardCollapsed;
+  const sessionHeader = hosted && !singlePane && !routeDeferred && focusedPane?.type === "session";
+  const nativeHeader = sessionHeader && (!tabletBand || edgeToolbar);
+  const publishHeader = nativeHeader || (sessionHeader && hasIPhoneWorkspaceControls());
+  useLayoutEffect(() => {
+    // A missing session can settle on a different pane after the phone starts restoring it.
+    if (!routeDeferred && !publishHeader && hasIPhoneWorkspaceControls()) {
+      tellIPhoneHost({ type: "sessionHeader", header: null });
+    }
+  }, [routeDeferred, publishHeader]);
+  const homeEdge = !singlePane && !hosted && focusedPane?.type === "session" ? homeScreenEdge : null;
+  const Title = (nativeHeader && edgeToolbar) || homeEdge ? "h1" : "span";
+  const needsYou = useNavigationStore(
+    useCallback(
+      (state: NavigationStoreState) =>
+        publishHeader || (tabletSplit && !boardVisible) ? selectNeedsYouCount(state) : 0,
+      [publishHeader, tabletSplit, boardVisible],
+    ),
+  );
+  const sidebarWidth = usePrefsStore((s) => s.sidebarWidth);
+  const boardMaxWidth = Math.min(
+    SIDEBAR_WIDTH_MAX,
+    Math.max(BOARD_MIN_WIDTH, viewportWidth - READER_MIN_WIDTH[fontSize]),
+  );
+  const boardWidth = clampSidebarWidth(sidebarWidth, BOARD_MIN_WIDTH, boardMaxWidth);
+  const boardRef = useRef<HTMLElement>(null);
+  const boardToggleRef = useRef<HTMLButtonElement>(null);
+  const restoreToggleFocusRef = useRef(false);
+  const boardTransition = useMemo(() => spatialTransition(), []);
+  const boardExitTransition = useMemo(() => spatialExitTransition(), []);
+
+  function toggleBoard() {
+    restoreToggleFocusRef.current = boardToggleRef.current === document.activeElement;
+    setBoardCollapsed((collapsed) => !collapsed);
+  }
+
+  useLayoutEffect(() => {
+    if (!restoreToggleFocusRef.current) return;
+    restoreToggleFocusRef.current = false;
+    boardToggleRef.current?.focus({ preventScroll: true });
+  });
+
   // True when no real pane is focused: either nothing at all, or the
   // welcome pane (the app's "nothing open" landing screen). The mobile
   // panel auto-opens in this state (see the effect below) so the rail —
@@ -287,14 +481,50 @@ export function StackHost({ railSlot, routeDeferred = false, singlePane = false 
   // chromeWasOpenRef is whether the drawer or the Overview was open at the
   // last commit: a pane chosen there replaces the stack's top, it is not a
   // step deeper, and the same tap usually closes the surface it came from.
+  // boardInputRef tracks whether the latest pointer/key/click intent landed in
+  // the docked tablet board, which stays open beside the reader.
   const stackBodyRef = useRef<HTMLDivElement>(null);
   const paneSlotRef = useRef<HTMLDivElement>(null);
   const committedSlotRef = useRef<HTMLDivElement | null>(null);
   const transitionFocusRef = useRef<string | null>(focusedPaneId);
   const popPendingRef = useRef(false);
   const chromeWasOpenRef = useRef(false);
+  const boardInputRef = useRef(false);
   const endTransitionRef = useRef<(() => void) | null>(null);
   const scrollOffsetsRef = useRef<ScrollOffsets>(new Map());
+  const topBarRef = useRef<HTMLDivElement>(null);
+  // Mirror of topBarCollapsed for the scroll listener (which installs once,
+  // on mount, like the offsets listener below it): reading state there would
+  // need the effect re-armed on every flip.
+  const topBarCollapsedRef = useRef(false);
+  const lastScrollTopRef = useRef(0);
+  // The scroller's scrollHeight as of the last event. A change between
+  // events means content shifted under the reader - the transcript prepends
+  // older turns as you scroll toward the top, and appends grow it below -
+  // so the scrollTop jump that arrives with it is not a gesture.
+  const lastScrollHeightRef = useRef(0);
+  // Highest scrollTop reached at the start of the current upward scroll run
+  // while the top bar is floating, so slow 120Hz drags that move less than
+  // FLOAT_REVEAL_STEP per frame still reveal once cumulative travel crosses it.
+  const upwardRunStartRef = useRef<number | null>(null);
+  // The scroller whose scroll drove the last collapse, and the resting bar
+  // height captured at that moment - both consumed by the compensation
+  // effect below. Cleared on every focus change.
+  const collapseScrollerRef = useRef<Element | null>(null);
+  const barHeightRef = useRef(0);
+  const prevTopBarCollapsedRef = useRef(false);
+  // Mirror of focusedPane for the same reason as topBarCollapsedRef.
+  const focusedPaneRef = useRef(focusedPane);
+  focusedPaneRef.current = focusedPane;
+  const headerPinnedRef = useRef(false);
+  const prevFocusedTypeRef = useRef<string | undefined>(focusedPane?.type);
+
+  // The resting bar height (safe-area padding included), read once on mount:
+  // the fold threshold below needs it BEFORE the first collapse, not after.
+  // jsdom measures 0, which the threshold's 48px floor already covers.
+  useLayoutEffect(() => {
+    if (topBarRef.current !== null) barHeightRef.current = topBarRef.current.offsetHeight;
+  }, []);
 
   // Installs the ONE popstate listener that feeds lastPopstateWasTrusted
   // (module-level - see its own comment above for why). A REAL browser
@@ -331,6 +561,22 @@ export function StackHost({ railSlot, routeDeferred = false, singlePane = false 
   // changing focus at all) this doesn't fully close.
   useEffect(() => {
     const prev = prevFocusedIdRef.current;
+    const focusedType = focusedPane?.type;
+    const typeChanged = prevFocusedTypeRef.current !== focusedType;
+    prevFocusedTypeRef.current = focusedType;
+    if (prev !== focusedPaneId || typeChanged) {
+      // A focus or pane-type change always restores the solid top bar
+      // (docs/web-ui/design-system.md §12): the next pane starts at the top of
+      // its own scroll, and non-session panes never collapse it anyway.
+      // Clearing the collapse scroller disarms the compensation effect for
+      // reveals that are not scroll-driven (this one).
+      topBarCollapsedRef.current = false;
+      setTopBarCollapsed(false);
+      lastScrollTopRef.current = 0;
+      lastScrollHeightRef.current = 0;
+      upwardRunStartRef.current = null;
+      collapseScrollerRef.current = null;
+    }
     if (prev !== focusedPaneId) {
       const realBrowserNav = lastPopstateWasTrusted;
       lastPopstateWasTrusted = false;
@@ -373,7 +619,10 @@ export function StackHost({ railSlot, routeDeferred = false, singlePane = false 
     if (!focusedPane) return;
     if (attentionEntryOwnsPane(focusedPane)) return;
     if (singlePaneRouteNames(window.location.pathname, focusedPane)) return;
-    const url = paneToURL(focusedPane.type, focusedPane.params);
+    const path = paneToURL(focusedPane.type, focusedPane.params);
+    // A pane identifies its path. The active URL also owns launcher prefill,
+    // the settings host and any fragment the user followed.
+    const url = path === window.location.pathname ? path + window.location.search + window.location.hash : path;
     if (url) {
       if (focusedPane.slot === "secondary" && isCascadeReturnedOrigin(focusedPane)) {
         publishFocusedPaneURL(url);
@@ -404,9 +653,9 @@ export function StackHost({ railSlot, routeDeferred = false, singlePane = false 
   // stays closed until the route resolves (the same beat the URL-sync effect
   // declines to publish over, see its own comment).
   useEffect(() => {
-    if (routeDeferred) return;
-    if (nothingFocused) setPanelOpen(true);
-  }, [nothingFocused, routeDeferred]);
+    if (tabletSplit) setPanelOpen(false);
+    else if (!routeDeferred && nothingFocused) setPanelOpen(true);
+  }, [nothingFocused, routeDeferred, tabletSplit]);
 
   useEffect(() => {
     if (activityOpen) setPanelOpen(false);
@@ -437,14 +686,104 @@ export function StackHost({ railSlot, routeDeferred = false, singlePane = false 
     };
   }, []);
 
+  // Floating top bar (docs/web-ui/design-system.md §12). A capture listener
+  // next to the offsets one above, because both watch the same scroll of the
+  // shown pane's slot. It collapses the bar only for session-family panes
+  // (session, sessionZoom, transcript) - the board and every inspector pane
+  // keep their solid header - and never for scrollers outside the slot (the
+  // drawer's own list and the tablet board scroll outside this body).
+  useEffect(() => {
+    const body = stackBodyRef.current;
+    if (!body) return;
+    const onScroll = (event: Event) => {
+      const target = event.target;
+      if (
+        !(target instanceof Element) ||
+        !paneSlotRef.current?.contains(target) ||
+        !target.matches(READING_SCROLLER_SELECTOR)
+      )
+        return;
+      const scrollTop = clampedScrollTop(target);
+      const prevScrollTop = lastScrollTopRef.current;
+      lastScrollTopRef.current = scrollTop;
+      const heightChanged = target.scrollHeight !== lastScrollHeightRef.current;
+      lastScrollHeightRef.current = target.scrollHeight;
+      const type = focusedPaneRef.current?.type;
+      // A height change is position-neutral: resync (the lastScrollTopRef
+      // update below) and decide nothing, so a prepend can never pose as a
+      // downward gesture and a reveal can never fire off appended content.
+      if (heightChanged) {
+        upwardRunStartRef.current = null;
+        return;
+      }
+      if (type === "session" || type === "sessionZoom" || type === "transcript") {
+        collapseScrollerRef.current = target;
+        // The fold must land the compensated scroll position clear of the
+        // at-top reveal band: collapsing at a scroll the compensation would
+        // clamp to 0 would bounce straight back out (st < 12 reveals).
+        const foldPast = Math.max(FLOAT_COLLAPSE_PAST, barHeightRef.current + FLOAT_REVEAL_AT_TOP);
+        let next = topBarCollapsedRef.current;
+        if (scrollTop > prevScrollTop) {
+          upwardRunStartRef.current = null;
+          if (scrollTop > foldPast && !headerPinnedRef.current) next = true;
+          else if (scrollTop < FLOAT_REVEAL_AT_TOP) next = false;
+        } else {
+          if (topBarCollapsedRef.current && scrollTop < prevScrollTop && upwardRunStartRef.current === null) {
+            upwardRunStartRef.current = prevScrollTop;
+          }
+          const upwardTravel = upwardRunStartRef.current === null ? 0 : upwardRunStartRef.current - scrollTop;
+          if (upwardTravel >= FLOAT_REVEAL_STEP || scrollTop < FLOAT_REVEAL_AT_TOP) next = false;
+        }
+        if (next !== topBarCollapsedRef.current) {
+          // On iPhone the notes summary folds with the title. Count the
+          // entire change in the reader's viewport before pinning its offset.
+          const bar = topBarRef.current;
+          if (next && bar) {
+            const notes = bar.parentElement?.hasAttribute("data-iphone-header")
+              ? paneSlotRef.current?.querySelector<HTMLElement>("[data-notes-panel-ref]")
+              : null;
+            if (notes?.contains(document.activeElement)) return;
+            barHeightRef.current = bar.offsetHeight + (notes?.offsetHeight ?? 0);
+            if (scrollTop <= barHeightRef.current + FLOAT_REVEAL_AT_TOP) return;
+          }
+          topBarCollapsedRef.current = next;
+          upwardRunStartRef.current = null;
+          setTopBarCollapsed(next);
+        }
+      }
+    };
+    body.addEventListener("scroll", onScroll, { capture: true, passive: true });
+    return () => body.removeEventListener("scroll", onScroll, { capture: true });
+  }, []);
+
+  // The floating bar leaves the flow, so the pane's body grows by the bar's
+  // resting height. Shift the scroller by the same amount in the opposite
+  // direction, before paint, so no frame shows the content jump - and write
+  // the scroll memory first, so the shift's own scroll event reads as "no
+  // change" instead of a large step that would instantly flip the bar back.
+  // Compute from the pre-flip offset rather than post-layout scroller.scrollTop:
+  // near the bottom, viewport growth clamps scrollTop before this effect runs.
+  useLayoutEffect(() => {
+    const prev = prevTopBarCollapsedRef.current;
+    prevTopBarCollapsedRef.current = topBarCollapsed;
+    if (prev === topBarCollapsed) return;
+    const scroller = collapseScrollerRef.current;
+    const barHeight = barHeightRef.current;
+    if (scroller === null || !scroller.isConnected || barHeight <= 0) return;
+    const adjusted = Math.max(0, lastScrollTopRef.current + (topBarCollapsed ? -barHeight : barHeight));
+    lastScrollTopRef.current = adjusted;
+    scroller.scrollTop = adjusted;
+    lastScrollTopRef.current = clampedScrollTop(scroller);
+  }, [topBarCollapsed]);
+
   // Classifies each focus change and slides it (docs/web-ui/motion.md, recipe
   // 4). A pop is a focus change a Back tap caused. A push is any other change
   // the user made from inside the shown pane to a pane beyond the landing
-  // screen; everything else replaces the pane without motion: the first
-  // pane, a choice made in the drawer or the Overview, browser history
-  // (whose own back gesture already animates on some phones), an attention
-  // entry being restored, the shown pane closing under the user, and a deep
-  // link still resolving.
+  // screen; everything else replaces the pane without motion: the first pane,
+  // a choice made in the Sessions drawer, tablet board, or Overview, browser
+  // history (whose own back gesture already animates on some phones), an
+  // attention entry being restored, the shown pane closing under the user, and
+  // a deep link still resolving.
   useLayoutEffect(() => {
     const chromeOpen = panelOpen || activityOpen;
     const chromeWasOpen = chromeWasOpenRef.current;
@@ -453,7 +792,12 @@ export function StackHost({ railSlot, routeDeferred = false, singlePane = false 
     const incoming = paneSlotRef.current;
     committedSlotRef.current = incoming;
     const previousId = transitionFocusRef.current;
-    if (previousId === focusedPaneId) return;
+    if (previousId === focusedPaneId) {
+      if (!boardVisible) boardInputRef.current = false;
+      return;
+    }
+    const fromBoard = boardInputRef.current;
+    boardInputRef.current = false;
     transitionFocusRef.current = focusedPaneId;
     endTransitionRef.current?.();
     const popped = popPendingRef.current;
@@ -465,6 +809,7 @@ export function StackHost({ railSlot, routeDeferred = false, singlePane = false 
     else if (
       !chromeOpen &&
       !chromeWasOpen &&
+      !fromBoard &&
       !lastPopstateWasTrusted &&
       !routeDeferred &&
       previousPane !== undefined &&
@@ -492,13 +837,24 @@ export function StackHost({ railSlot, routeDeferred = false, singlePane = false 
       );
     }
     offsets.clear();
-  }, [focusedPaneId, focusedPane, panes, panelOpen, activityOpen, routeDeferred]);
+  }, [focusedPaneId, focusedPane, panes, panelOpen, activityOpen, routeDeferred, boardVisible]);
 
   useLayoutEffect(() => () => endTransitionRef.current?.(), []);
 
-  // A press starts a new intent: a Back tap's pending pop does not outlive it.
-  const clearPendingPop = useCallback(() => {
+  // A press starts a new intent: a Back tap's pending pop does not outlive it,
+  // and only input inside the board column marks the next focus change as a
+  // board replacement.
+  const clearPendingIntent = useCallback(() => {
     popPendingRef.current = false;
+    boardInputRef.current = false;
+  }, []);
+
+  const clearBoardInput = useCallback(() => {
+    boardInputRef.current = false;
+  }, []);
+
+  const markBoardInput = useCallback(() => {
+    boardInputRef.current = true;
   }, []);
 
   function handleBack(): void {
@@ -557,15 +913,11 @@ export function StackHost({ railSlot, routeDeferred = false, singlePane = false 
           (origin && panes.includes(origin) ? origin : undefined) ??
           panes.find(
             (pane) =>
-              pane.id !== focusedPaneId &&
-              pane.type === "session" &&
-              (pane.params as { ref?: unknown }).ref === params.parentRef,
+              pane.id !== focusedPaneId && pane.type === "session" && refParam(pane.params) === params.parentRef,
           ) ??
           panes.find(
             (pane) =>
-              pane.id !== focusedPaneId &&
-              pane.type === "transcript" &&
-              (pane.params as { ref?: unknown }).ref === params.parentRef,
+              pane.id !== focusedPaneId && pane.type === "transcript" && refParam(pane.params) === params.parentRef,
           );
         target = ancestor?.id;
         // Reject cycles, not incomplete context: an absent farther ancestor
@@ -658,6 +1010,22 @@ export function StackHost({ railSlot, routeDeferred = false, singlePane = false 
   const panelPaneTypes = new Set(["sessionTasks", "sessionDetails"]);
   const isPanelPane = focusedPane !== null && panelPaneTypes.has(focusedPane.type);
   const focusedSessionRef = focusedPane?.type === "session" ? (refParam(focusedPane.params) ?? undefined) : undefined;
+  // The focused session's notes card attaches to the solid bar's seam
+  // (topnotespanel.module.css), so expanding it restores a floating bar: the
+  // reveal is chrome, not a scroll gesture, and the capsules would otherwise
+  // sit over the card's header row. The empty string matches no session ref.
+  const focusedNotesExpanded = useTopNotesExpanded(focusedSessionRef ?? "");
+  const headerPinned = focusedNotesExpanded || nativeFindOpen;
+  headerPinnedRef.current = headerPinned;
+  useLayoutEffect(() => {
+    if (!headerPinned || !topBarCollapsedRef.current) return;
+    topBarCollapsedRef.current = false;
+    upwardRunStartRef.current = null;
+    setTopBarCollapsed(false);
+    // Unlike a focus change, the reader stays in this pane, so the collapse
+    // scroller stays armed: the compensation effect holds the reading position
+    // when the pane's layout regains the bar's height.
+  }, [headerPinned]);
   const livePaneIds = useMemo(() => new Set(panes.map((pane) => pane.id)), [panes]);
   const retainedParentRef = focusedPane?.type === "session" ? conversationOpenParentRef(focusedPane) : undefined;
   const retainedParentAvailable =
@@ -673,7 +1041,43 @@ export function StackHost({ railSlot, routeDeferred = false, singlePane = false 
       backStackRef.current.some((id) => id !== focusedPane.id && livePaneIds.has(id)));
   const showBack =
     focusedPane !== null && focusedPane.type !== "welcome" && (focusedSessionRef === undefined || sessionBackAvailable);
-  const drawer = !singlePane ? <TreeDrawer onToggle={() => setPanelOpen((v) => !v)} /> : null;
+  const drawer = !singlePane && !tabletSplit ? <TreeDrawer onToggle={() => setPanelOpen((v) => !v)} /> : null;
+  const boardToggle = tabletSplit ? (
+    <IconButton
+      ref={boardToggleRef}
+      data-testid="board-toggle"
+      label={needsYou > 0 ? `Board (${needsYou} need attention)` : "Board"}
+      aria-expanded={boardVisible}
+      variant="quiet"
+      icon={<SidebarIcon />}
+      badge={needsYou > 0 ? { count: needsYou, tone: "attention" } : undefined}
+      onClick={toggleBoard}
+    />
+  ) : null;
+
+  const leading = (
+    <div className={styles.leading}>
+      {!boardVisible && boardToggle}
+      {showBack ? (
+        <IconButton
+          label="Back"
+          icon={<Chevron direction="left" size={24} />}
+          variant="quiet"
+          onClick={isPanelPane ? handlePanelBack : (paneBack ?? handleBack)}
+        />
+      ) : (
+        focusedSessionRef !== undefined && drawer
+      )}
+    </div>
+  );
+  const trailing = (
+    <div className={styles.trailing}>
+      {focusedSessionRef !== undefined && (
+        <SessionInspectionActions sessionRef={focusedSessionRef} paneId={focusedPane?.id} />
+      )}
+      {focusedSessionRef === undefined && drawer}
+    </div>
+  );
 
   function handlePanelBack(): void {
     if (!focusedPane) return;
@@ -686,49 +1090,113 @@ export function StackHost({ railSlot, routeDeferred = false, singlePane = false 
   }
 
   return (
-    <div className={styles.host} onPointerDownCapture={clearPendingPop} onKeyDownCapture={clearPendingPop}>
-      <div className={styles.topBar} data-session={focusedSessionRef === undefined ? undefined : "true"}>
-        <div className={styles.leading}>
-          {showBack ? (
-            <IconButton
-              label="Back"
-              icon={<Chevron direction="left" size={16} />}
-              variant="quiet"
-              onClick={isPanelPane ? handlePanelBack : (paneBack ?? handleBack)}
-            />
-          ) : (
-            focusedSessionRef !== undefined && drawer
-          )}
-        </div>
-        <span className={styles.stackTitle} data-testid="topbar-title">
-          {paneTitle}
-        </span>
-        {focusedSessionRef !== undefined && (
-          <SessionInspectionActions sessionRef={focusedSessionRef} paneId={focusedPane?.id} />
+    <div
+      className={styles.host}
+      onPointerDownCapture={clearPendingIntent}
+      onKeyDownCapture={clearPendingIntent}
+      onClickCapture={clearBoardInput}
+    >
+      <div
+        className={styles.split}
+        data-board={tabletSplit ? (boardVisible ? "visible" : "collapsed") : undefined}
+        data-testid={tabletSplit ? "board-split" : undefined}
+      >
+        {tabletSplit && (
+          <BoardPresentContext.Provider value={boardVisible}>
+            <AnimatePresence initial={false}>
+              {boardVisible && (
+                <TabletBoardColumn
+                  key="tablet-board"
+                  boardRef={boardRef}
+                  boardWidth={boardWidth}
+                  boardMaxWidth={boardMaxWidth}
+                  boardToggle={boardToggle}
+                  railSlot={railSlot}
+                  transition={boardTransition}
+                  exitTransition={boardExitTransition}
+                  onBoardInput={markBoardInput}
+                />
+              )}
+            </AnimatePresence>
+          </BoardPresentContext.Provider>
         )}
-        {focusedSessionRef === undefined && drawer}
-      </div>
-      <div ref={stackBodyRef} className={styles.stackBody} data-stacked-pane-type={focusedPane?.type}>
-        {focusedPane && (
-          // key forces a fresh mount on every distinct pane id, including
-          // switching BACK to a previously-seen one - without it, two
-          // panes of the SAME registered type (same Component reference)
-          // would just re-render in place instead of remounting, breaking
-          // the unmount-not-hide contract every pane is designed around
-          // (see StackedPane's own comment). Two different pane TYPES
-          // already remount naturally (React unmounts on element type
-          // change), but same-type-different-params (e.g. two session
-          // panes) would not, without this. The slot is keyed with it, so
-          // the slot React detaches is the old pane's whole last frame.
-          <div key={focusedPane.id} ref={paneSlotRef} className={styles.paneSlot} data-stack-pane={focusedPane.id}>
-            <StackedPane pane={focusedPane} />
+        {/* Keep the same pane slot and scroll listener on both sides of the tablet floor. */}
+        <div
+          className={styles.paneColumn}
+          data-iphone-header={nativeHeader ? (topBarCollapsed ? "floating" : "resting") : undefined}
+          data-testid={tabletSplit ? "pane-column" : undefined}
+        >
+          <div
+            ref={topBarRef}
+            className={topBarCollapsed ? `${styles.topBar} ${styles.topBarCollapsed}` : styles.topBar}
+            data-home-edge={homeEdge ?? undefined}
+            data-testid="topbar"
+            data-collapsed={topBarCollapsed ? "true" : undefined}
+            data-session={focusedSessionRef === undefined ? undefined : "true"}
+          >
+            {!homeEdge && leading}
+            <Title className={styles.stackTitle} data-testid="topbar-title">
+              {paneTitle}
+            </Title>
+            {!homeEdge && trailing}
           </div>
-        )}
+          {publishHeader && focusedSessionRef && !panelOpen && !activityOpen && (
+            <IPhoneSessionHeader
+              bar={topBarRef}
+              edgeToolbar={edgeToolbar}
+              split={tabletSplit}
+              id={focusedPane.id}
+              sessionRef={focusedSessionRef}
+              title={paneTitle ?? ""}
+              leading={showBack ? "back" : boardVisible ? null : "sessions"}
+              needsYou={needsYou}
+              collapsed={topBarCollapsed}
+              onFindChange={setNativeFindOpen}
+              onAction={(action) => {
+                switch (action) {
+                  case "back":
+                    (paneBack ?? handleBack)();
+                    break;
+                  case "sessions":
+                    if (tabletSplit) toggleBoard();
+                    else setPanelOpen(true);
+                    break;
+                  case "find":
+                    requestFindInSession(focusedSessionRef, { target: focusedPane.id });
+                    break;
+                  case "overview":
+                    openSessionOverview(focusedSessionRef, focusedPane.id, true);
+                    break;
+                }
+              }}
+            />
+          )}
+          <div ref={stackBodyRef} className={styles.stackBody} data-stacked-pane-type={focusedPane?.type}>
+            {focusedPane && (
+              // Only a distinct pane id detaches the outgoing pane's last frame.
+              <div key={focusedPane.id} ref={paneSlotRef} className={styles.paneSlot} data-stack-pane={focusedPane.id}>
+                <StackedPane pane={focusedPane} />
+              </div>
+            )}
+          </div>
+        </div>
       </div>
+      {homeEdge && (
+        <div
+          role="toolbar"
+          aria-label="Conversation actions"
+          hidden={activityOpen || panelOpen}
+          data-home-toolbar={homeEdge}
+          className={styles.homeToolbar}
+        >
+          {leading}
+          {trailing}
+        </div>
+      )}
       <div className={styles.activityOverlay}>
         <ActivitySidebar mobile />
       </div>
-      <MobilePanel rail={railSlot} open={panelOpen} onClose={closePanel} />
+      {!tabletSplit && <MobilePanel rail={railSlot} open={panelOpen} onClose={closePanel} />}
     </div>
   );
 }
