@@ -32,6 +32,7 @@ import {
   formatCharCount,
   formatDurationMs,
   isErrorEvent,
+  isQuietYield,
   MEMORY_CONTEXT_EVENT_KIND,
   scopedDisclosureId,
   systemEventWords,
@@ -42,8 +43,7 @@ import {
   expandDetailsByDefault,
   useTranscriptRenderContext,
 } from "../../../../transcriptDisplay/renderContext";
-import { Disclosure, FailureGlyph, Markdown } from "../../../../widgets";
-import { disclosureDefault } from "../../../../widgets/disclosure/disclosureStore";
+import { Disclosure, disclosureDefault, FailureGlyph, Markdown } from "../../../../widgets";
 import { requireClass } from "../../../../widgets/internal/requireClass";
 import { SYSTEM_PROMPT_ITEM_ID } from "../transcriptVisibility";
 import { FAILURE_FALLBACK_LABEL, failureText } from "../turnFailure";
@@ -62,11 +62,15 @@ import {
   shouldGroup,
 } from "./systemGrouping";
 import styles from "./systemnoticeitem.module.css";
+import { useTranscriptDisclosure } from "./useTranscriptDisclosure";
 import { WarningBlock } from "./WarningItem";
 
 const CLASS = {
   line: requireClass(styles.line, "systemnoticeitem.module.css", "line"),
+  quietYield: requireClass(styles.quietYield, "systemnoticeitem.module.css", "quietYield"),
+  quietYieldSummary: requireClass(styles.quietYieldSummary, "systemnoticeitem.module.css", "quietYieldSummary"),
   failure: requireClass(styles.failure, "systemnoticeitem.module.css", "failure"),
+  failureIcon: requireClass(styles.failureIcon, "systemnoticeitem.module.css", "failureIcon"),
   failureText: requireClass(styles.failureText, "systemnoticeitem.module.css", "failureText"),
   groupBody: requireClass(styles.groupBody, "systemnoticeitem.module.css", "groupBody"),
   scaffoldBody: requireClass(styles.scaffoldBody, "systemnoticeitem.module.css", "scaffoldBody"),
@@ -116,7 +120,6 @@ function scaffoldLabel(item: ItemModel): string {
 // and stay folded at every level until explicitly opened.
 function ScaffoldDisclosure({ item, sessionRef }: { item: ItemModel; sessionRef?: string }) {
   const context = useTranscriptRenderContext();
-  const { config } = context;
   const disclosureScope = disclosureScopeForSession(context, sessionRef);
   // Open/closed state lives in the shared disclosureStore keyed by session ref
   // plus item id, so an expanded scaffold survives a remount without colliding
@@ -124,7 +127,7 @@ function ScaffoldDisclosure({ item, sessionRef }: { item: ItemModel; sessionRef?
   const disclosureKey = scopedDisclosureId(disclosureScope, item.id);
   const isNotesSnapshot = item.eventKind === "notes-context";
   const disclosureFallback =
-    !isNotesSnapshot && (expandDetailsByDefault(config) || disclosureDefault(disclosureScope, item.id, false));
+    !isNotesSnapshot && (expandDetailsByDefault(context.config) || disclosureDefault(disclosureScope, item.id, false));
   return (
     <Disclosure
       variant="quiet"
@@ -227,11 +230,42 @@ function FailureLine({ item, turn }: { item: ItemModel; turn: TurnModel }) {
       data-attention="error"
       data-fallback={text ? undefined : "true"}
     >
-      <FailureGlyph />
+      <span className={CLASS.failureIcon}>
+        <FailureGlyph />
+      </span>
       <span className={CLASS.failureText} data-message-body="">
         {text ?? FAILURE_FALLBACK_LABEL}
       </span>
     </div>
+  );
+}
+
+function QuietYieldLine({ item, sessionRef }: { item: ItemModel; sessionRef?: string }) {
+  const words = systemEventWords(item);
+  const summary = words.label ?? words.text;
+  const context = useTranscriptRenderContext();
+  const disclosureScope = disclosureScopeForSession(context, sessionRef);
+  const disclosureKey = scopedDisclosureId(disclosureScope, item.id);
+  if (!words.rendersMarkdown) {
+    return (
+      <div className={CLASS.quietYield} data-testid="system-notice-line" data-message-body="">
+        {summary}
+      </div>
+    );
+  }
+  return (
+    <Disclosure
+      variant="quiet"
+      id={disclosureKey}
+      defaultOpen={false}
+      ignoreBaseline
+      data-testid="system-notice-quiet-yield"
+      summary={<span className={CLASS.quietYieldSummary}>{summary}</span>}
+    >
+      <div className={CLASS.scaffoldBody} data-testid="system-notice-quiet-yield-body" data-message-body="">
+        <Markdown source={words.text} />
+      </div>
+    </Disclosure>
   );
 }
 
@@ -261,6 +295,7 @@ function SystemLine({
   if (isScaffoldItem(item)) return <ScaffoldDisclosure item={item} sessionRef={sessionRef} />;
   if (isRoundTimingsItem(item)) return <RoundTimingsLine item={item} />;
   if (item.eventKind === APPROVAL_DECISION_EVENT_KIND) return <ApprovalDecisionLine item={item} />;
+  if (isQuietYield(item)) return <QuietYieldLine item={item} sessionRef={sessionRef} />;
   return <NoticeLine text={noticeText(item)} fallback={!systemEventWords(item).text} />;
 }
 
@@ -287,15 +322,16 @@ function SystemGroup({
   // plus the run's first item id - the run's stable identity across renders -
   // so an expanded group survives a remount without cross-session collision.
   const context = useTranscriptRenderContext();
-  const { config } = context;
-  const disclosureScope = disclosureScopeForSession(context, sessionRef);
-  const disclosureKey = scopedDisclosureId(disclosureScope, firstItem.id);
-  const disclosureFallback = expandDetailsByDefault(config) || disclosureDefault(disclosureScope, firstItem.id, false);
+  const disclosure = useTranscriptDisclosure({
+    scope: disclosureScopeForSession(context, sessionRef),
+    id: firstItem.id,
+    defaultOpen: expandDetailsByDefault(context.config),
+  });
   return (
     <Disclosure
       variant="quiet"
-      id={disclosureKey}
-      defaultOpen={disclosureFallback}
+      id={disclosure.key}
+      defaultOpen={disclosure.fallback}
       data-testid="system-notice-group"
       summary={
         <span data-count={count}>

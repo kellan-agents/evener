@@ -850,7 +850,6 @@ type RestoreSessionConfig struct {
 	LLMRetryPolicy          *llm.RetryPolicy
 	LLMSleep                llm.SleepFunc
 	spawn                   spawnConfig
-	resumeHistory           []schema.Turn
 	deferRestoreSideEffects bool
 	// sandboxProvisioned is set only by the stable-delegate restore path after it
 	// has re-resolved and enabled the descriptor's complete sandbox policy. That
@@ -907,20 +906,6 @@ type RestoreSessionConfig struct {
 	// the fail-safe answer (nothing is authorized) and is what a caller that
 	// never called discovery leaves.
 	StartupMCPProjectEvidence *mcpconfig.LayerEvidence
-
-	// OnRestoredTranscript, when set, receives the transcript this resume
-	// validated: the header (its SessionID already checked against the
-	// session's id), the final decoded entry list after every restore-time
-	// append, and whether a transcript was opened at all (true for a
-	// header-only one). It exists so serve can project its app identity from
-	// the one strict decode restore already did instead of re-reading the
-	// file. The session itself keeps no reference to the entries: a
-	// transcript can decode to more memory than the file holds, and a
-	// restored session -- a delegate child, a one-shot run -- would otherwise
-	// carry it for its whole life. The entries alias the slice restore goes
-	// on to fold for the delegate attention rearm right after the call, so
-	// the receiver must not mutate them.
-	OnRestoredTranscript func(header transcript.Header, entries []transcript.Entry, opened bool)
 
 	// ForceRealIO carries through to the restored Session's SessionConfig.
 	// See SessionConfig.ForceRealIO's own comment (session_config.go) - the
@@ -1114,9 +1099,6 @@ func RestoreSessionFromMetaWithConfig(client *llm.Client, profile *provider.Prof
 	var resumeTranscript *transcript.Writer
 	var transcriptEntries []transcript.Entry
 	var restoredTranscriptHeader transcript.Header
-	// opened flag for OnRestoredTranscript; captured at the open so the
-	// refresh below can't flip it.
-	restoredTranscriptOpened := false
 	if cfg.StateDir != "" {
 		tpath := schema.SessionTranscriptPath(cfg.StateDir, meta.ID)
 		var openErr error
@@ -1127,7 +1109,6 @@ func RestoreSessionFromMetaWithConfig(client *llm.Client, profile *provider.Prof
 		if resumeTranscript != nil {
 			restoredTranscriptHeader = resumeTranscript.Header()
 		}
-		restoredTranscriptOpened = openErr == nil
 	}
 	// A fork's copied prefix names turns this session's store never reserved;
 	// its own turns are named above them.
@@ -1171,9 +1152,7 @@ func RestoreSessionFromMetaWithConfig(client *llm.Client, profile *provider.Prof
 	// coordinate mappers below share: the transcript folds for them once,
 	// not once per reopen marker and boundary they map.
 	var superseded map[string]bool
-	if restoreCfg.resumeHistory != nil {
-		resumeHistory = append([]schema.Turn(nil), restoreCfg.resumeHistory...)
-	} else if len(transcriptEntries) > 0 {
+	if len(transcriptEntries) > 0 {
 		superseded = supersededDelegateAttentionIDs(transcriptEntries)
 		resumeHistory, repairInsertions = resumeHistoryIndexedWithSuperseded(transcriptEntries, superseded)
 	}
@@ -1191,7 +1170,7 @@ func RestoreSessionFromMetaWithConfig(client *llm.Client, profile *provider.Prof
 	// transcript, and a compacted transcript resumes partway through it, so the
 	// bound shifts by where the retained history begins.
 	divergenceTurn := meta.DivergenceTurn
-	if restoreCfg.resumeHistory == nil && len(transcriptEntries) > 0 {
+	if len(transcriptEntries) > 0 {
 		// The resumed history starts at the retained window, leaves out the
 		// transcript-only entries, and repair insertions before the fork
 		// boundary shift it right by one each (resumedDivergence carries the
@@ -1417,7 +1396,7 @@ func RestoreSessionFromMetaWithConfig(client *llm.Client, profile *provider.Prof
 	// Restore daemon steering before restore side effects can enqueue a
 	// restart-owned notification. Loading it later would overwrite that new
 	// notification with the pre-restart snapshot.
-	if steering, _, err := loadQueues(s.stateDir, s.id); err != nil {
+	if steering, err := loadQueues(s.stateDir, s.id); err != nil {
 		s.emit(events.WarningData{Message: fmt.Sprintf("restore: queue reload failed: %v", err)})
 	} else {
 		s.steeringQueue = daemonSourcedSteering(steering)
@@ -1629,11 +1608,9 @@ func RestoreSessionFromMetaWithConfig(client *llm.Client, profile *provider.Prof
 	}
 	s.attachTranscript(tw, transcriptEntries)
 	// refreshFromDisk re-reads the transcript file whenever a restore-time
-	// replay appended turns it did not decode: the retained entry list would
-	// otherwise end at the last pre-append entry, and serve (which projects
-	// exactly this list) would seed its turn snapshot and live-turn-id fence
-	// one turn behind the file. Both refresh triggers share it so there is
-	// one refresh, not two mechanisms.
+	// replay appended turns it did not decode, so later restore steps
+	// (crash closure, skill reconciliation, delegate attention rearm, and
+	// SessionStart TranscriptEntries) see the full file.
 	refreshFromDisk := func(reason string) error {
 		refreshed, err := readTranscriptFull(context.Background(), transcriptPath(s.stateDir, s.id), s.stateDir)
 		if err != nil {
@@ -1643,7 +1620,6 @@ func RestoreSessionFromMetaWithConfig(client *llm.Client, profile *provider.Prof
 			return fmt.Errorf("refresh transcript after %s: header session %q does not match %q", reason, refreshed.Header.SessionID, s.id)
 		}
 		transcriptEntries = refreshed.Entries
-		restoredTranscriptHeader = refreshed.Header
 		return nil
 	}
 	// An execution the crashed process left open ended when it died: record
@@ -1692,19 +1668,15 @@ func RestoreSessionFromMetaWithConfig(client *llm.Client, profile *provider.Prof
 	// survived but whose admission did not (a metadata save failure or a
 	// crash between the input turn and the obligation persist). It runs over
 	// ALL decoded entries — after the catalog is discovered and the
-	// transcript is attached, before OnRestoredTranscript receives the
+	// transcript is attached, before the delegate attention rearm folds the
 	// final entry list — and never repeats a covered invocation.
 	if s.reconcilePendingSkillSelections(context.Background(), transcriptEntries) && tw != nil {
 		if err := refreshFromDisk("skill selection reconciliation"); err != nil {
 			return nil, err
 		}
 	}
-	// OnRestoredTranscript and the attention rearm both run after every
-	// restore-time transcript append, so serve and the fold see the same
-	// final entry list the file holds.
-	if restoreCfg.OnRestoredTranscript != nil {
-		restoreCfg.OnRestoredTranscript(restoredTranscriptHeader, transcriptEntries, restoredTranscriptOpened)
-	}
+	// Run the attention rearm after every restore-time transcript append so
+	// the fold sees the same final entry list the file holds.
 	if err := s.rearmRootDelegateAttentionFromTranscript(transcriptEntries); err != nil {
 		return nil, fmt.Errorf("rearm root delegate attention: %w", err)
 	}
@@ -1959,7 +1931,7 @@ func (s *Session) initSessionState(sessionStartKind plugin.SessionStartKind, run
 		for _, name := range effectiveAllowedToolNames {
 			allowed[name] = true
 		}
-		s.reg.RestrictKeepingResultTool(allowed, s.resultToolName())
+		s.reg.Restrict(allowed, s.resultToolName())
 	}
 	for _, name := range s.cfg.spawn.deniedToolNames {
 		s.reg.Remove(name)
@@ -2005,7 +1977,7 @@ func (s *Session) initSessionState(sessionStartKind plugin.SessionStartKind, run
 		// Stable delegates freeze a capability ceiling before their durable start.
 		// Apply the final intersection after NewSession has added every intrinsic
 		// tool so neither the live registry nor its model-facing cache can widen it.
-		s.reg.RestrictKeepingResultTool(ceiling, s.resultToolName())
+		s.reg.Restrict(ceiling, s.resultToolName())
 	}
 	// Only the coordinator writes the session URL list, and a subagent cannot
 	// ask the human (#6080, ask_user). This gate is the last removal, after the
@@ -2017,6 +1989,10 @@ func (s *Session) initSessionState(sessionStartKind plugin.SessionStartKind, run
 		}
 	}
 	s.filterUnavailableMemoryTools()
+	// Ceremony tools come out after the result tool's collision check and after
+	// all allowed/denied/ceiling/protected filters so --result-tool-name still
+	// refuses them and oneShotOmittedTools records only policy-eligible names.
+	omitOneShotCeremonyTools(s.reg, s)
 	// A role preload is prepared on the creating parent and a frozen descriptor
 	// replays the body frozen at creation; drop what this session cannot follow
 	// before the permanent prompt and inventory carry it.
@@ -2091,6 +2067,9 @@ func (s *Session) initSessionState(sessionStartKind plugin.SessionStartKind, run
 			s.launchEnvBaseline = s.envRuntimeSnapshot(envctx.Snapshot{})
 			s.launchEnvBaseline.GitBranch = cmp.Or(s.launchEnvBaseline.GitBranch, s.envInfo.GitBranch)
 			s.envTracker.SeedRuntime(s.launchEnvBaseline)
+		} else if !restoredPromptHasLegacyCommunicateGuidance(restoredPrompt, s.resultToolName()) {
+			s.launchEnvBaseline.CommunicateContract = cmp.Or(s.launchEnvBaseline.CommunicateContract, s.communicateContractLine())
+			s.envTracker.SeedRuntime(envctx.Snapshot{CommunicateContract: s.launchEnvBaseline.CommunicateContract})
 		}
 	}
 	if warning := s.commitProvenanceWarning(); warning != "" {
@@ -2106,6 +2085,18 @@ func (s *Session) initSessionState(sessionStartKind plugin.SessionStartKind, run
 	s.acquireSessionLivelock()
 
 	return s.promptSourceLog, nil
+}
+
+func restoredPromptHasLegacyCommunicateGuidance(prompt, resultTool string) bool {
+	if prompt == "" || strings.Contains(prompt, schema.CommunicateNextLogQuietlyAndEndTurn) {
+		return false
+	}
+	if resultTool == "" {
+		resultTool = tool.DefaultResultToolName
+	}
+	return strings.Contains(prompt, "end_turn") ||
+		strings.Contains(prompt, "communicate({})") ||
+		strings.Contains(prompt, resultTool+"({})")
 }
 
 func (s *Session) validateModelFallbacks() error {

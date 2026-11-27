@@ -901,7 +901,7 @@ func TestToolRegistry_TruncationLines_UsesHeadTailAndOmittedMarker(t *testing.T)
 	}
 }
 
-func TestToolRegistry_Unregister(t *testing.T) {
+func TestToolRegistry_Remove(t *testing.T) {
 	r := NewRegistry()
 	_ = r.Register(RegisteredTool{
 		Definition: llm.ToolDefinition{Name: "foo", Parameters: map[string]any{"type": "object", "properties": map[string]any{}}},
@@ -909,9 +909,9 @@ func TestToolRegistry_Unregister(t *testing.T) {
 			return "ok", nil
 		},
 	})
-	r.Unregister("foo")
+	r.Remove("foo")
 	if r.Get("foo") != nil {
-		t.Fatal("expected nil after Unregister")
+		t.Fatal("expected nil after Remove")
 	}
 }
 
@@ -1017,7 +1017,7 @@ func TestTruncateChars_UTF8Aware(t *testing.T) {
 	}
 
 	// Truncate to 3 characters (runes), not 3 bytes.
-	result := truncateChars(input, 3, schema.TruncHeadTail)
+	result, _ := truncateChars(input, 3, schema.TruncHeadTail)
 	// Should contain valid UTF-8 (no broken characters).
 	if !utf8.ValidString(result) {
 		t.Error("truncated result must be valid UTF-8")
@@ -1032,75 +1032,12 @@ func TestTruncateChars_UTF8Aware(t *testing.T) {
 	}
 
 	// schema.TruncTail: keep last 3 characters
-	result2 := truncateChars(input, 3, schema.TruncTail)
+	result2, _ := truncateChars(input, 3, schema.TruncTail)
 	if !utf8.ValidString(result2) {
 		t.Error("schema.TruncTail result must be valid UTF-8")
 	}
 	if !strings.Contains(result2, "😂🤣😃") {
 		t.Error("schema.TruncTail should keep last 3 emojis")
-	}
-}
-
-func TestToolRegistry_Middleware_CalledBeforeExecution(t *testing.T) {
-	reg := NewRegistry()
-	if err := reg.Register(RegisteredTool{
-		Definition: llm.ToolDefinition{
-			Name:        "test_tool",
-			Description: "test",
-			Parameters:  map[string]any{"type": "object"},
-		},
-		Exec: func(ctx context.Context, env execenv.ExecutionEnvironment, args map[string]any) (any, error) {
-			return "executed", nil
-		},
-	}); err != nil {
-		t.Fatal(err)
-	}
-
-	var middlewareCalled bool
-	reg.Use(func(ctx context.Context, name string, args map[string]any) error {
-		middlewareCalled = true
-		return nil
-	})
-
-	result := reg.ExecuteCall(context.Background(), nil, llm.ToolCallData{Name: "test_tool", ID: "c1"})
-	if !middlewareCalled {
-		t.Error("middleware must be called before execution")
-	}
-	if result.IsError {
-		t.Errorf("expected success, got error: %s", result.Output)
-	}
-}
-
-func TestToolRegistry_Middleware_CanBlockExecution(t *testing.T) {
-	reg := NewRegistry()
-	var execCalled bool
-	if err := reg.Register(RegisteredTool{
-		Definition: llm.ToolDefinition{
-			Name:        "test_tool",
-			Description: "test",
-			Parameters:  map[string]any{"type": "object"},
-		},
-		Exec: func(ctx context.Context, env execenv.ExecutionEnvironment, args map[string]any) (any, error) {
-			execCalled = true
-			return "executed", nil
-		},
-	}); err != nil {
-		t.Fatal(err)
-	}
-
-	reg.Use(func(ctx context.Context, name string, args map[string]any) error {
-		return errors.New("permission denied: tool blocked by policy")
-	})
-
-	result := reg.ExecuteCall(context.Background(), nil, llm.ToolCallData{Name: "test_tool", ID: "c1"})
-	if !result.IsError {
-		t.Error("middleware rejection should produce error result")
-	}
-	if !strings.Contains(result.Output, "permission denied") {
-		t.Errorf("expected 'permission denied' in output, got: %s", result.Output)
-	}
-	if execCalled {
-		t.Error("tool should not have been executed when middleware blocked")
 	}
 }
 
@@ -1634,10 +1571,9 @@ func TestToolRegistry_ExecuteCall_AskUserShorthandPreservesIntent(t *testing.T) 
 // TestRegistry_MarksPreExecutionRejections proves Rejected names exactly the
 // calls a pre-execution gate refused: the breaker park, unknown tool,
 // ValidateRawArguments, invalid arguments JSON, the ask_user shorthand
-// normalization, NormalizeArgs, PreValidate, schema validation, and a
-// middleware refusal — the nine gates ExecResult.Rejected's doc names. A tool
-// that RAN and returned an error is not a rejection, so the hook partition can
-// tell a refusal from a failure.
+// normalization, NormalizeArgs, PreValidate, and schema validation — the eight
+// gates ExecResult.Rejected's doc names. A tool that RAN and returned an error
+// is not a rejection, so the hook partition can tell a refusal from a failure.
 //
 // This is the only test asserting Rejected at the unknown-tool gate;
 // TestToolRegistry_UnknownTool_ReturnsErrorResult covers that gate's error
@@ -1743,14 +1679,6 @@ func TestRegistry_MarksPreExecutionRejections(t *testing.T) {
 		reg := NewRegistry()
 		calls := registerProbe(t, reg, "probe", probeOpts{})
 		res := reg.ExecuteCall(context.Background(), nil, llm.ToolCallData{Name: "probe", ID: "id", Arguments: json.RawMessage(`{}`)})
-		assertRejectedRefusal(t, res, calls)
-	})
-
-	t.Run("middleware_refusal", func(t *testing.T) {
-		reg := NewRegistry()
-		calls := registerProbe(t, reg, "probe", probeOpts{})
-		reg.Use(func(context.Context, string, map[string]any) error { return errors.New("middleware refused") })
-		res := reg.ExecuteCall(context.Background(), nil, llm.ToolCallData{Name: "probe", ID: "id", Arguments: json.RawMessage(`{"path":"x"}`)})
 		assertRejectedRefusal(t, res, calls)
 	})
 

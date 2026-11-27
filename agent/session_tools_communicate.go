@@ -8,12 +8,15 @@ import (
 	"fmt"
 	"maps"
 	"reflect"
+	"slices"
 	"strings"
+	"sync/atomic"
 
 	"primeradiant.com/evener/agent/events"
 	"primeradiant.com/evener/agent/execenv"
 	"primeradiant.com/evener/agent/internal/tool"
 	"primeradiant.com/evener/agent/schema"
+	"primeradiant.com/evener/internal/apptranscript"
 	"primeradiant.com/evener/llm"
 )
 
@@ -92,36 +95,40 @@ func registerCommunicateTool(reg *tool.Registry, deps *toolDeps) error {
 			if err := deps.abort(ctx); err != nil {
 				return nil, err
 			}
-			message := ""
-			if v, ok := args["message"]; ok {
-				message = strings.TrimSpace(fmt.Sprint(v))
+			if _, hasLegacy := args["end_turn"]; hasLegacy {
+				return nil, errors.New(`communicate no longer takes end_turn; pass next ("send_and_end_turn", "send_and_continue", or "log_quietly_and_end_turn")`)
 			}
-			endTurn := true
-			if v, ok := args["end_turn"].(bool); ok {
-				endTurn = v
+			next := tool.CommunicateNextSendAndEndTurn
+			if rawNext, ok := args["next"]; ok && rawNext != nil {
+				s, isString := rawNext.(string)
+				if !isString {
+					return nil, errors.New("communicate next must be a string")
+				}
+				s = strings.TrimSpace(s)
+				if s != "" {
+					next = s
+				}
+			}
+			if !slices.Contains(schema.CommunicateNextValues, next) {
+				return nil, fmt.Errorf("unknown communicate next value %q", next)
+			}
+			message := ""
+			if v, ok := args["message"]; ok && v != nil {
+				message = strings.TrimSpace(fmt.Sprint(v))
 			}
 			rawOutput, outputPresent := args["output"]
 			originalOutput := normalizeNodeOutput(rawOutput)
-			if message == "" {
-				if !structuredRequired {
-					message = strings.TrimSpace(originalOutput.Message)
-				} else if outMap, ok := rawOutput.(map[string]any); ok {
-					if outMsg, ok := outMap["message"].(string); ok {
-						message = strings.TrimSpace(outMsg)
-					}
-				}
-			}
 			explicitNodeOutput := hasMeaningfulNodeOutput(originalOutput)
 			meaningfulOutput := outputPresent
 			if !structuredRequired {
 				meaningfulOutput = explicitNodeOutput || hasMeaningfulRawOutput(rawOutput)
 			}
-			if message == "" {
-				if !endTurn {
-					return nil, errors.New("communicate with end_turn=false requires a non-empty message")
+			if next == tool.CommunicateNextLogQuietlyAndEndTurn {
+				if message == "" {
+					return nil, errors.New(`communicate with next="log_quietly_and_end_turn" requires a non-empty message`)
 				}
 				if meaningfulOutput {
-					return nil, errors.New("communicate with output requires a non-empty message")
+					return nil, errors.New(`communicate with next="log_quietly_and_end_turn" does not accept output`)
 				}
 				if err := deps.abort(ctx); err != nil {
 					return nil, err
@@ -132,14 +139,30 @@ func registerCommunicateTool(reg *tool.Registry, deps *toolDeps) error {
 				if err := deps.canQuietlyYield(ctx); err != nil {
 					return nil, err
 				}
+				quietNote := schema.NormalizeQuietNote(message)
 				deps.recordQuietYield()
 				inbox := drainCommunicateInbox(deps)
 				accepted := true
-				b, _ := json.Marshal(map[string]any{"accepted": true, "end_turn": true, "quiet": true, "inbox": inbox})
+				companion, _ := ctx.Value(communicateCompanionKey{}).(*communicateCompanion)
+				b, _ := json.Marshal(map[string]any{"accepted": true, "next": next, "quiet": true, "inbox": inbox})
 				return tool.StateResult{Output: string(b), State: communicateEndState{
-					Accepted: &accepted, EndTurn: &accepted, Quiet: &accepted,
+					Accepted: &accepted, EndTurn: &accepted, Quiet: &accepted, QuietNote: quietNote,
+					QuietCommentary: companion.claim(),
 				}}, nil
 			}
+			if message == "" {
+				if !structuredRequired {
+					message = strings.TrimSpace(originalOutput.Message)
+				} else if outMap, ok := rawOutput.(map[string]any); ok {
+					if outMsg, ok := outMap["message"].(string); ok {
+						message = strings.TrimSpace(outMsg)
+					}
+				}
+			}
+			if message == "" {
+				return nil, fmt.Errorf("communicate with next=%q requires a non-empty message", next)
+			}
+			endTurn := next == tool.CommunicateNextSendAndEndTurn
 			if endTurn && structuredRequired && !outputPresent {
 				return nil, errors.New("communicate requires output on a final reply with a result schema or allowed decisions")
 			}
@@ -169,7 +192,7 @@ func registerCommunicateTool(reg *tool.Registry, deps *toolDeps) error {
 				return nil, err
 			}
 
-			// A delegate's end_turn=false message is an update for its parent.
+			// A delegate's send_and_continue message is an update for its parent.
 			// The message is already in this transcript, so delivery never
 			// fails the call; the result says where the update stands.
 			var update *delegateUpdateDelivery
@@ -182,8 +205,8 @@ func registerCommunicateTool(reg *tool.Registry, deps *toolDeps) error {
 				inbox = drainCommunicateInbox(deps)
 			}
 
-			// end_turn=false calls never reach the terminal capture, so they stay
-			// accepted; end_turn=true calls are accepted iff they won the capture.
+			// send_and_continue calls never reach the terminal capture, so they stay
+			// accepted; send_and_end_turn calls are accepted iff they won the capture.
 			accepted := !endTurn
 			if endTurn {
 				// Atomic terminal capture (issue #570): the call's message,
@@ -203,7 +226,7 @@ func registerCommunicateTool(reg *tool.Registry, deps *toolDeps) error {
 
 			resp := map[string]any{
 				"accepted": accepted,
-				"end_turn": endTurn,
+				"next":     next,
 				"inbox":    inbox,
 			}
 			if update != nil {
@@ -232,6 +255,7 @@ func registerCommunicateTool(reg *tool.Registry, deps *toolDeps) error {
 		}
 		return err
 	}
+	reg.SetResultToolName(resultToolName)
 	if resultToolName != tool.DefaultResultToolName {
 		// The profile registry seeded the canonical communicate definition with
 		// profilePlaceholderExecutor. This session's result tool now lives under
@@ -265,6 +289,54 @@ var errQuietYieldWithoutWake = errors.New("nothing can wake this turn. Start the
 
 type communicateEntryKindKey struct{}
 
+// communicateCompanion carries the round's assistant prose when the round also
+// called communicate quietly. claimed keeps a second quiet call in the same
+// round from recording the prose twice.
+type communicateCompanion struct {
+	text    string
+	claimed atomic.Bool
+}
+
+type communicateCompanionKey struct{}
+
+// claim returns the companion prose once, or "" when it was already claimed.
+func (c *communicateCompanion) claim() string {
+	if c == nil || !c.claimed.CompareAndSwap(false, true) {
+		return ""
+	}
+	return c.text
+}
+
+// quietCompanionText collects distinct trimmed text runs from content and
+// joins non-empty runs with blank lines so companion prose split across tool
+// calls or other non-text parts is not concatenated directly. Metadata-only
+// reasoning parts leave a text run unbroken, matching internal/apptranscript.
+func quietCompanionText(content []llm.ContentPart) string {
+	var runs []string
+	var cur strings.Builder
+	flush := func() {
+		if cur.Len() == 0 {
+			return
+		}
+		if trimmed := strings.TrimSpace(cur.String()); trimmed != "" {
+			runs = append(runs, trimmed)
+		}
+		cur.Reset()
+	}
+	for _, part := range content {
+		if part.Kind == llm.ContentText {
+			cur.WriteString(part.Text)
+			continue
+		}
+		if apptranscript.MetadataOnlyResponsesReasoning(part) {
+			continue
+		}
+		flush()
+	}
+	flush()
+	return strings.Join(runs, "\n\n")
+}
+
 func (s *Session) canQuietlyYield(ctx context.Context) error {
 	kind, _ := ctx.Value(communicateEntryKindKey{}).(EntryKind)
 	if !s.reportsToParent() {
@@ -290,8 +362,8 @@ func (s *Session) canQuietlyYield(ctx context.Context) error {
 	if leased && s.delegateController != nil {
 		switch kind {
 		case EntryDelegateAttention:
-			recorded, err := s.delegateController.recordAttentionNoAction(lease)
-			if err != nil || recorded {
+			eligible, err := s.delegateController.canRecordAttentionNoAction(lease)
+			if err != nil || eligible {
 				return err
 			}
 		case EntryNotification:
@@ -308,7 +380,7 @@ func (s *Session) canQuietlyYield(ctx context.Context) error {
 			}
 		}
 	}
-	if work, err := s.treeHasOutstandingWork(); work || err != nil {
+	if work, err := s.subagentHasDrainableWork(); work || err != nil {
 		return err
 	}
 	return errors.New("nothing can wake this turn, and you have not sent your report yet. Start the work, or send your final report with the result tool")
@@ -351,7 +423,7 @@ func unmarshalCommunicateArguments(raw []byte, args *map[string]any) error {
 type communicateEndState = schema.CommunicateToolState
 
 // delegateUpdateDelivery is where a delegate's update stands when its
-// communicate(end_turn=false) call returns: the result's delivery and reason.
+// communicate(next="send_and_continue") call returns: the result's delivery and reason.
 type delegateUpdateDelivery struct {
 	Status string
 	Reason string
@@ -369,8 +441,8 @@ const (
 	delegateUpdateNotDelivered = "not_delivered"
 )
 
-// postDelegateUpdate hands a delegate's communicate(end_turn=false) message
-// to its parent as an update. It returns nil for a root, whose end_turn=false
+// postDelegateUpdate hands a delegate's communicate(next="send_and_continue") message
+// to its parent as an update. It returns nil for a root, whose send_and_continue
 // message is a checkpoint for its human partner and goes nowhere else.
 //
 // An update carries the message and nothing else, the way a report does: it
@@ -429,7 +501,7 @@ func notDeliveredUpdate(err error) *delegateUpdateDelivery {
 	return &delegateUpdateDelivery{Status: delegateUpdateNotDelivered, Reason: reason}
 }
 
-// runningJobsEndTurnWarning builds the end_turn=true warning naming this
+// runningJobsEndTurnWarning builds the send_and_end_turn warning naming this
 // session's still-running managed jobs or detached processes. Warn-first (2026-08-06 ruling): the
 // communicate call still succeeds, there is no refusal path.
 //

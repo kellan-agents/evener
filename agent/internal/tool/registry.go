@@ -36,7 +36,7 @@ import (
 // row grammar wants it most (plain file reads), but a missing rationale must
 // not fail at dispatch, where the retry breaker would park repeated
 // legacy-shaped calls.
-const toolIntentDescription = "What you hope to learn or accomplish from this tool call, using a verb-first gerund. Make your hypothesis and the desired outcome clear; e.g. \"Reading config to identify the active profile, so I can log in.\" or \"Searching handlers for request routing, so I can trace the hang.\""
+const toolIntentDescription = "Verb-first gerund stating your hypothesis and desired outcome (e.g. \"Reading config to find the active profile\")."
 
 // MaxToolArgumentBytes caps the size of a tool call's raw argument payload
 // before it is parsed, so a runaway generation can't push a multi-hundred-KB
@@ -398,7 +398,6 @@ type ExecResult struct {
 	//   - the tool's NormalizeArgs
 	//   - the tool's PreValidate
 	//   - schema validation
-	//   - a middleware refusal
 	// It is the registry-side twin of PrevalOnly (the session repair step's
 	// refusal). A tool that RAN and returned an error is NOT rejected. Claude
 	// fires neither PostToolUse nor PostToolUseFailure for a refused call, so the
@@ -563,16 +562,11 @@ func (t RegisteredTool) UnmarshalArguments(raw []byte, args *map[string]any) err
 	return json.Unmarshal(raw, args)
 }
 
-// toolMiddleware is called after argument validation but before tool execution.
-// Return a non-nil error to block execution (the error message is returned to the LLM).
-type toolMiddleware func(ctx context.Context, toolName string, args map[string]any) error
-
-// Registry is a concurrency-safe collection of registered tools and the
-// middleware run before their execution.
+// Registry is a concurrency-safe collection of registered tools.
 type Registry struct {
-	mu         sync.RWMutex
-	tools      map[string]RegisteredTool
-	middleware []toolMiddleware
+	mu             sync.RWMutex
+	tools          map[string]RegisteredTool
+	resultToolName string
 
 	// breaker is this dispatch scope's record of repeated identical calls.
 	// One registry per session, so the ledger is per-session; it carries its
@@ -585,11 +579,11 @@ func NewRegistry() *Registry {
 	return &Registry{tools: map[string]RegisteredTool{}, breaker: newFailureLedger()}
 }
 
-// Clone returns an independent registry with the same registered tools and
-// middleware. Compiled schemas are immutable after registration, so clones share
-// schema pointers while keeping their tool maps isolated. A clone is a new
-// dispatch scope, so it starts with the fresh breaker ledger NewRegistry gives
-// it — repeated-call state must never leak out of the session that produced it.
+// Clone returns an independent registry with the same registered tools.
+// Compiled schemas are immutable after registration, so clones share schema
+// pointers while keeping their tool maps isolated. A clone is a new dispatch
+// scope, so it starts with the fresh breaker ledger NewRegistry gives it —
+// repeated-call state must never leak out of the session that produced it.
 func (r *Registry) Clone() *Registry {
 	out := NewRegistry()
 	if r == nil {
@@ -609,16 +603,32 @@ func (r *Registry) Clone() *Registry {
 			out.tools[name] = registered
 		}
 	}
-	out.middleware = append([]toolMiddleware(nil), r.middleware...)
+	out.resultToolName = r.resultToolName
 	return out
 }
 
-// Use appends a middleware to the tool execution pipeline.
-// Middleware runs after argument validation but before tool execution.
-func (r *Registry) Use(mw toolMiddleware) {
+// SetResultToolName records the session's configured result tool name so
+// breaker nudges name the actual result tool.
+func (r *Registry) SetResultToolName(name string) {
+	if r == nil {
+		return
+	}
 	r.mu.Lock()
-	defer r.mu.Unlock()
-	r.middleware = append(r.middleware, mw)
+	r.resultToolName = strings.TrimSpace(name)
+	r.mu.Unlock()
+}
+
+func (r *Registry) resultToolNameOrDefault() string {
+	if r == nil {
+		return DefaultResultToolName
+	}
+	r.mu.RLock()
+	name := r.resultToolName
+	r.mu.RUnlock()
+	if name == "" {
+		return DefaultResultToolName
+	}
+	return name
 }
 
 // Register validates and stores a tool in the registry. It rejects an invalid
@@ -692,14 +702,9 @@ func (r *Registry) Definitions() []llm.ToolDefinition {
 // The result tool (communicate or its configured alias) is always kept
 // (subagents need it to return results). The resultToolName parameter
 // specifies the name to preserve; pass empty string for "communicate".
-func (r *Registry) Restrict(allowed map[string]bool) {
-	r.RestrictKeepingResultTool(allowed, "communicate")
-}
-
-// RestrictKeepingResultTool is like Restrict but allows specifying the result tool name.
-func (r *Registry) RestrictKeepingResultTool(allowed map[string]bool, resultToolName string) {
+func (r *Registry) Restrict(allowed map[string]bool, resultToolName string) {
 	if resultToolName == "" {
-		resultToolName = "communicate"
+		resultToolName = DefaultResultToolName
 	}
 	allowed[resultToolName] = true
 	r.mu.Lock()
@@ -749,13 +754,6 @@ func (r *Registry) RequiresOutputRecovery(names []string) bool {
 		}
 	}
 	return false
-}
-
-// Unregister deletes the named tool from the registry.
-func (r *Registry) Unregister(name string) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	delete(r.tools, name)
 }
 
 // Get returns the named registered tool, or nil if it is not registered.
@@ -810,11 +808,10 @@ func (r *Registry) Names() []string {
 }
 
 // ExecuteCall runs a single tool call: it looks up the tool, parses and
-// schema-validates the arguments, runs the registered middleware, invokes the
-// executor, and returns a truncated ExecResult. Unknown tools, invalid
-// arguments, failed validation, blocking middleware, and executor errors are
-// each returned as an error result. ImageResult and StateResult values are
-// unpacked into the result's image and state fields.
+// schema-validates the arguments, invokes the executor, and returns a
+// truncated ExecResult. Unknown tools, invalid arguments, failed validation,
+// and executor errors are each returned as an error result. ImageResult and
+// StateResult values are unpacked into the result's image and state fields.
 func (r *Registry) ExecuteCall(ctx context.Context, env execenv.ExecutionEnvironment, call llm.ToolCallData) ExecResult {
 	return r.executeCall(ctx, env, call, false)
 }
@@ -922,15 +919,6 @@ func (r *Registry) executeCall(ctx context.Context, env execenv.ExecutionEnviron
 		return rejectedResult(name, callID, msg, t.Limit)
 	}
 
-	r.mu.RLock()
-	mws := r.middleware
-	r.mu.RUnlock()
-	for _, mw := range mws {
-		if err := mw(ctx, name, args); err != nil {
-			return rejectedResult(name, callID, err.Error(), t.Limit)
-		}
-	}
-
 	intent, _ := args["intent"].(string)
 	delete(args, "intent")
 	// The handler can no longer see intent in args — but the shell tool
@@ -968,7 +956,7 @@ func (r *Registry) executeCall(ctx context.Context, env execenv.ExecutionEnviron
 		case repeatStreak >= breakerThreshold:
 			// Repeats on every subsequent identical result: nothing else
 			// applies pressure once repetition is never parked.
-			appendIntervention(&res, repetitionNudgeText(repeatStreak))
+			appendIntervention(&res, repetitionNudgeText(repeatStreak, r.resultToolNameOrDefault()))
 		}
 	}
 	return res
@@ -1087,13 +1075,13 @@ func truncateResult(toolName, callID, full string, isErr bool, lim schema.ToolOu
 		out, reason = truncateHeadCountReason(out, lim.MaxLines, lim.MaxChars)
 	} else {
 		var charTruncated bool
-		out, charTruncated = truncateCharsWithStatus(out, lim.MaxChars, lim.Strategy)
+		out, charTruncated = truncateChars(out, lim.MaxChars, lim.Strategy)
 		if charTruncated {
 			reason = TruncatedByChars
 		}
 		if lim.MaxLines > 0 {
 			var lineTruncated bool
-			out, lineTruncated = truncateLinesWithStatus(out, lim.MaxLines)
+			out, lineTruncated = truncateLines(out, lim.MaxLines)
 			if lineTruncated && reason == "" {
 				reason = TruncatedByLines
 			}
@@ -1137,7 +1125,7 @@ func rejectedResult(toolName, callID, full string, lim schema.ToolOutputLimit) E
 }
 
 // omittedNumberedLines is the window of line-numbered text that
-// truncateCharsWithStatus's head/tail cut at limit drops. Both boundary lines
+// truncateChars's head/tail cut at limit drops. Both boundary lines
 // are included because each is shown only in part. It returns nil when the
 // text at either boundary carries no line number.
 func omittedNumberedLines(full string, limit int) *LineRange {
@@ -1175,12 +1163,7 @@ func numberedLineAt(runes []rune, pos int) (int, bool) {
 	return n, err == nil
 }
 
-func truncateChars(s string, limit int, strategy schema.TruncationStrategy) string {
-	out, _ := truncateCharsWithStatus(s, limit, strategy)
-	return out
-}
-
-func truncateCharsWithStatus(s string, limit int, strategy schema.TruncationStrategy) (string, bool) {
+func truncateChars(s string, limit int, strategy schema.TruncationStrategy) (string, bool) {
 	runes := []rune(s)
 	if limit <= 0 || len(runes) <= limit {
 		return s, false
@@ -1276,12 +1259,7 @@ func truncateHeadChars(s string, limit int, splitNotes bool) (string, bool) {
 	}
 }
 
-func truncateLines(s string, limit int) string {
-	out, _ := truncateLinesWithStatus(s, limit)
-	return out
-}
-
-func truncateLinesWithStatus(s string, limit int) (string, bool) {
+func truncateLines(s string, limit int) (string, bool) {
 	if limit <= 0 {
 		return s, false
 	}

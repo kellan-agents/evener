@@ -215,7 +215,7 @@ no router (reserved).
 | `thread/turns/items/list` | unimplemented | [ThreadTurnItemsListParams](#threadturnitemslistparams) | [ThreadTurnItemsListResponse](#threadturnitemslistresponse) | Codex-parity: paginated items for one turn. Experimental even in Codex (returns method-not-supported) and served by no evener router. |
 | `thread/start` | hub | [ThreadStartParams](#threadstartparams) | [ThreadStartResponse](#threadstartresponse) | Starts a new thread and attaches a live-update relay. |
 | `thread/resume` | hub | [ThreadResumeParams](#threadresumeparams) | [ThreadResumeResponse](#threadresumeresponse) | Resumes an existing session and attaches its relay. |
-| `thread/fork` | hub | [ThreadForkParams](#threadforkparams) | [ThreadForkResponse](#threadforkresponse) | Forks a thread from a source item (sourceItemKey), either replacing the turn with edited input or deferring the original input back to the client for editing (deferInput, mutually exclusive with editedInput). With `aside: true` (local evener threads only; mutually exclusive with sourceItemKey/editedInput/deferInput/label), forks the session at its tip into a side thread that inherits the parent's permissions and config. |
+| `thread/fork` | hub | [ThreadForkParams](#threadforkparams) | [ThreadForkResponse](#threadforkresponse) | Forks a thread from a source item (sourceItemKey), either replacing the turn with edited input or deferring the original input back to the client for editing (deferInput, mutually exclusive with editedInput). With `aside: true` (local evener threads only; mutually exclusive with sourceItemKey/editedInput/deferInput/label), forks the session at its tip into a side thread that inherits the parent's permissions and config. Optional `model` and `modelProvider` override the child thread's model. |
 | `thread/clear` | both | [ThreadClearParams](#threadclearparams) | [ThreadClearResponse](#threadclearresponse) | Clears the thread's conversation when no turn, queued, or approval work is unresolved. |
 | `thread/model/set` | both | [ThreadModelSetParams](#threadmodelsetparams) | [EmptyResponse](#emptyresponse) | Changes the session's model/provider. |
 | `evener/thread/name/set` | both | [ThreadNameSetParams](#threadnamesetparams) | [EmptyResponse](#emptyresponse) | Sets a user-chosen session title (rename). |
@@ -249,6 +249,7 @@ no router (reserved).
 | `evener/thread/watches/list` | both | [SessionActivityListParams](#sessionactivitylistparams) | [SessionWatchesResponse](#sessionwatchesresponse) | Pages receiver-owned watches and bounded retained history for a session or its subtree. |
 | `evener/subagentPreview` | hub | [EvenerSubagentPreviewParams](#evenersubagentpreviewparams) | [EvenerSubagentPreviewResponse](#evenersubagentpreviewresponse) | Reads a bounded lazy preview of a subagent transcript's latest direct items. |
 | `evener/paths/complete` | hub | [PathsCompleteParams](#pathscompleteparams) | [PathsCompleteResponse](#pathscompleteresponse) | Path autocompletion for a prefix. |
+| `evener/files/search` | hub | [FilesSearchParams](#filessearchparams) | [FilesSearchResponse](#filessearchresponse) | Fuzzy-searches files and directories under a session's live working directory or an explicit host directory, honoring .gitignore and secret-path masks. |
 | `evener/dirs/create` | hub | [DirsCreateParams](#dirscreateparams) | [DirsCreateResponse](#dirscreateresponse) | Creates a missing working directory and its parents for Spawn preflight. |
 | `evener/projects/recent` | hub | [ProjectsRecentParams](#projectsrecentparams) | [ProjectsRecentResponse](#projectsrecentresponse) | Lists the most recently used project working directories (session creation path-dropdown options; default cap 15). |
 | `evener/path/validate` | hub | [PathValidateParams](#pathvalidateparams) | [PathValidateResponse](#pathvalidateresponse) | Validates a launch path. |
@@ -1452,6 +1453,7 @@ Underlying Go kind: `string` (no struct fields).
 | `auth` | bool |  |  |
 | `transcriptDisplaySettings` | bool | yes |  |
 | `keybindingsSettings` | bool | yes |  |
+| `threadStartIdempotency` | bool | yes |  |
 
 
 ### `FencingEpoch`
@@ -1460,6 +1462,32 @@ Underlying Go kind: `string` (no struct fields).
 |-------|---------|-----------|----------|
 | `bootId` | string |  |  |
 | `opSeq` | uint64 |  |  |
+
+
+### `FileSearchItem`
+
+| Field | Go type | Omitempty | Embedded |
+|-------|---------|-----------|----------|
+| `path` | string |  |  |
+| `kind` | string |  |  |
+
+
+### `FilesSearchParams`
+
+| Field | Go type | Omitempty | Embedded |
+|-------|---------|-----------|----------|
+| `ref` | string | yes |  |
+| `cwd` | string | yes |  |
+| `query` | string |  |  |
+| `limit` | int | yes |  |
+
+
+### `FilesSearchResponse`
+
+| Field | Go type | Omitempty | Embedded |
+|-------|---------|-----------|----------|
+| `items` | [][appwire.FileSearchItem](#filesearchitem) |  |  |
+| `truncated` | bool | yes |  |
 
 
 ### `GitHeadParams`
@@ -2122,6 +2150,8 @@ Underlying Go kind: `struct` (no struct fields).
 |-------|---------|-----------|----------|
 | `name` | string |  |  |
 | `newName` | string | yes |  |
+| `base` | string | yes |  |
+| `clearBase` | bool | yes |  |
 | `baseUrl` | string | yes |  |
 | `clearBaseUrl` | bool | yes |  |
 | `protocol` | string | yes |  |
@@ -2169,6 +2199,7 @@ Underlying Go kind: `struct` (no struct fields).
 | `configRevision` | string | yes |  |
 | `credentialRequired` | bool |  |  |
 | `warnings` | []string | yes |  |
+| `loadError` | string | yes |  |
 | `models` | [][appwire.InstanceModelEntry](#instancemodelentry) | yes |  |
 
 
@@ -4458,6 +4489,8 @@ Underlying Go kind: `string` (no struct fields).
 | `version` | string | yes |  |
 | `commit` | string | yes |  |
 | `buildChannel` | string | yes |  |
+| `buildTime` | string | yes |  |
+| `releaseTag` | string | yes |  |
 | `listenAddr` | string | yes |  |
 | `runDir` | string | yes |  |
 | `spawnTimeout` | string | yes |  |
@@ -4871,8 +4904,6 @@ Underlying Go kind: `string` (no struct fields).
 |-------|---------|-----------|----------|
 | `cursor` | string | yes |  |
 | `limit` | int | yes |  |
-| `sortKey` | string | yes |  |
-| `sortDirection` | string | yes |  |
 | `searchTerm` | string | yes |  |
 | `statuses` | []string | yes |  |
 | `sourceIds` | []string | yes |  |
@@ -5078,6 +5109,7 @@ Underlying Go kind: `string` (no struct fields).
 | `nonInteractive` | \*bool | yes |  |
 | `launchOverrides` | \*[appwire.LaunchConfigLayer](#launchconfiglayer) | yes |  |
 | `manager` | bool | yes |  |
+| `clientMutationId` | string | yes |  |
 
 
 ### `ThreadStartResponse`
@@ -5086,6 +5118,8 @@ Underlying Go kind: `string` (no struct fields).
 |-------|---------|-----------|----------|
 | `thread` | [appwire.Thread](#thread) |  |  |
 | `turn` | [appwire.Turn](#turn) |  |  |
+| `clientMutationId` | string | yes |  |
+| `disposition` | [appwire.MutationDisposition](#mutationdisposition) | yes |  |
 
 
 ### `ThreadStartedParams`
@@ -5614,11 +5648,16 @@ Underlying Go kind: `string` (no struct fields).
 | `buildChannel` | string |  |  |
 | `currentVersion` | string |  |  |
 | `currentCommit` | string |  |  |
+| `currentReleaseTag` | string | yes |  |
+| `currentBuildTime` | string | yes |  |
 | `latestTag` | string | yes |  |
 | `latestCommit` | string | yes |  |
+| `latestPublishedAt` | string | yes |  |
+| `repoUrl` | string | yes |  |
 | `updateAvailable` | bool |  |  |
 | `applicable` | bool |  |  |
 | `onDiskCommit` | string | yes |  |
+| `onDiskBuildTime` | string | yes |  |
 | `onDiskError` | string | yes |  |
 | `installAvailable` | bool |  |  |
 | `restartPending` | bool |  |  |

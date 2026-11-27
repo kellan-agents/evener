@@ -77,6 +77,7 @@ import {
 import { useSyncExternalStore } from "react";
 import { useStore } from "zustand";
 import { createStore } from "zustand/vanilla";
+import type { WebLayout } from "../shell/useIsMobile";
 
 export type ThemePref = "system" | "light" | "dark";
 export type PhoneDensityPref = "compact" | "comfortable";
@@ -104,14 +105,21 @@ export type SidebarGroupingPref = "host-project" | "project-host";
 // stored value must decode to "createdAt", never reach a read as a garbage
 // sortKey.
 export type ProjectSessionOrderPref = "createdAt" | "lastActivity";
+export type SessionListStylePref = "auto" | "flat" | "compact";
+
+export function defaultSessionListStyle(layout: WebLayout): Exclude<SessionListStylePref, "auto"> {
+  return layout === "desktop" ? "compact" : "flat";
+}
 
 export interface PrefsStoreState {
   theme: ThemePref;
   phoneDensity: PhoneDensityPref;
   sidebarHidden: boolean;
   sidebarWidth: number;
+  overviewWidth: number;
   sidebarGrouping: SidebarGroupingPref;
   projectSessionOrder: ProjectSessionOrderPref;
+  sessionListStyle: Record<WebLayout, SessionListStylePref>;
   fontSize: FontSizePref;
   transcriptMeasure: TranscriptMeasurePref;
   // Composer prefs (Display section, parity-m7-settings.md §5). Field names
@@ -144,8 +152,10 @@ export interface PrefsStoreState {
   setPhoneDensity(value: PhoneDensityPref): void;
   setSidebarHidden(value: boolean): void;
   setSidebarWidth(value: number): void;
+  setOverviewWidth(value: number): void;
   setSidebarGrouping(value: SidebarGroupingPref): void;
   setProjectSessionOrder(value: ProjectSessionOrderPref): void;
+  setSessionListStyle(layout: WebLayout, value: SessionListStylePref): void;
   setFontSize(value: FontSizePref): void;
   setTranscriptMeasure(value: TranscriptMeasurePref): void;
   setEnterToSend(value: boolean): void;
@@ -319,9 +329,31 @@ export function sidebarWidthMin(): number {
   return window.matchMedia("(any-pointer: coarse)").matches ? SIDEBAR_WIDTH_MIN_TOUCH : SIDEBAR_WIDTH_MIN;
 }
 
-export function clampSidebarWidth(value: number): number {
+export function clampSidebarWidth(value: number, min = sidebarWidthMin(), max = SIDEBAR_WIDTH_MAX): number {
   if (!Number.isFinite(value)) return SIDEBAR_WIDTH_DEFAULT;
-  return Math.round(Math.min(SIDEBAR_WIDTH_MAX, Math.max(sidebarWidthMin(), value)));
+  return Math.round(Math.min(max, Math.max(min, value)));
+}
+
+// Desktop Overview sidebar width bounds, in CSS pixels. Narrow desktop
+// viewports (900-1200px) cap below OVERVIEW_WIDTH_MAX so the rail and
+// workspace column keep a comfortable reading floor.
+export const OVERVIEW_WIDTH_MIN = 280;
+export const OVERVIEW_WIDTH_MAX = 640;
+export const OVERVIEW_WIDTH_DEFAULT = 320;
+const OVERVIEW_VIEWPORT_RESERVE = 560;
+
+export function overviewWidthMax(viewportWidth?: number): number {
+  if (viewportWidth === undefined || !Number.isFinite(viewportWidth)) return OVERVIEW_WIDTH_MAX;
+  return Math.min(
+    OVERVIEW_WIDTH_MAX,
+    Math.max(OVERVIEW_WIDTH_MIN, Math.round(viewportWidth - OVERVIEW_VIEWPORT_RESERVE)),
+  );
+}
+
+export function clampOverviewWidth(value: number, viewportWidth?: number): number {
+  const max = overviewWidthMax(viewportWidth);
+  if (!Number.isFinite(value)) return Math.min(max, OVERVIEW_WIDTH_DEFAULT);
+  return Math.round(Math.min(max, Math.max(OVERVIEW_WIDTH_MIN, value)));
 }
 
 // Numeric prefs persist as a plain base-10 string. Anything unparseable
@@ -352,6 +384,14 @@ const TRANSCRIPT_MEASURE_VALUES: readonly TranscriptMeasurePref[] = ["reading", 
 const LOUD_SCOPE_VALUES: readonly NotificationsLoudScopePref[] = ["asks", "all"];
 const SIDEBAR_GROUPING_VALUES: readonly SidebarGroupingPref[] = ["host-project", "project-host"];
 const PROJECT_SESSION_ORDER_VALUES: readonly ProjectSessionOrderPref[] = ["createdAt", "lastActivity"];
+
+function sessionListStyleKey(layout: WebLayout): string {
+  return `sessionListStyle.${layout}`;
+}
+
+function readSessionListStyle(layout: WebLayout): SessionListStylePref {
+  return readEnum<SessionListStylePref>(sessionListStyleKey(layout), ["flat", "compact"], "auto");
+}
 
 // Per-field localStorage key names for the grouped notifications record -
 // exposed as a small in-memory record for a convenient single destructure at
@@ -496,8 +536,10 @@ function loadInitialState(): Omit<
   | "setPhoneDensity"
   | "setSidebarHidden"
   | "setSidebarWidth"
+  | "setOverviewWidth"
   | "setSidebarGrouping"
   | "setProjectSessionOrder"
+  | "setSessionListStyle"
   | "setFontSize"
   | "setTranscriptMeasure"
   | "setEnterToSend"
@@ -520,8 +562,14 @@ function loadInitialState(): Omit<
     phoneDensity,
     sidebarHidden: readBool("sidebarHidden", false),
     sidebarWidth: readNumber("sidebarWidth", SIDEBAR_WIDTH_DEFAULT, clampSidebarWidth),
+    overviewWidth: readNumber("overviewWidth", OVERVIEW_WIDTH_DEFAULT, (value) => clampOverviewWidth(value)),
     sidebarGrouping: readEnum("sidebarGrouping", SIDEBAR_GROUPING_VALUES, "project-host"),
     projectSessionOrder: readEnum("projectSessionOrder", PROJECT_SESSION_ORDER_VALUES, "createdAt"),
+    sessionListStyle: {
+      phone: readSessionListStyle("phone"),
+      tablet: readSessionListStyle("tablet"),
+      desktop: readSessionListStyle("desktop"),
+    },
     fontSize,
     transcriptMeasure,
     enterToSend: readBool("enterToSend", false),
@@ -567,6 +615,12 @@ export const prefsStore = createStore<PrefsStoreState>((set) => ({
     set({ sidebarWidth: width });
   },
 
+  setOverviewWidth(value) {
+    const width = clampOverviewWidth(value);
+    writeNumber("overviewWidth", width);
+    set({ overviewWidth: width });
+  },
+
   setSidebarGrouping(value) {
     writeRaw("sidebarGrouping", value);
     set({ sidebarGrouping: value });
@@ -575,6 +629,13 @@ export const prefsStore = createStore<PrefsStoreState>((set) => ({
   setProjectSessionOrder(value) {
     writeRaw("projectSessionOrder", value);
     set({ projectSessionOrder: value });
+  },
+
+  setSessionListStyle(layout, value) {
+    const key = sessionListStyleKey(layout);
+    if (value === "auto") removeRaw(key);
+    else writeRaw(key, value);
+    set((state) => ({ sessionListStyle: { ...state.sessionListStyle, [layout]: value } }));
   },
 
   setFontSize(value) {

@@ -7,12 +7,20 @@ function measurement(width, ids, { stop = true, steer = false, statusBottom = 40
     currentWork: {
       verbCluster: { containerWidth: width, controls: ids.length - 1, top: 20, statusRowBottom: statusBottom },
       controls: ids.map((testId) => ({ testId, present: true })),
+      controlGeometry: Object.fromEntries(
+        ids.map((testId) => [
+          testId,
+          { left: 0, right: 44, top: triggerTop, bottom: triggerTop + 44, width: 44, height: 44 },
+        ]),
+      ),
       controlsFound: true,
       controlsContained: true,
       controlsDoNotOverlap: true,
-      sharedPaneWithoutOverflow: true,
+      composerCardFound: true,
+      composerFitsPane: true,
+      found: false,
     },
-    trigger: { top: triggerTop },
+    trigger: { left: 0, right: 44, top: triggerTop, bottom: triggerTop + 44 },
     scrollers: [],
     menuVerbs: { open: true, stop, steer },
   };
@@ -24,6 +32,9 @@ test("a compact folded composer checks menu alignment when no status row exists"
   assertComposerPlacement(aligned, expected);
   const wrapped = measurement(358, ["composer-attach", "composer-stop"], { statusBottom: null, triggerTop: 64 });
   assert.throws(() => assertComposerPlacement(wrapped, expected), assert.AssertionError);
+  const staleWork = structuredClone(aligned);
+  staleWork.currentWork.found = true;
+  assert.throws(() => assertComposerPlacement(staleWork, expected), assert.AssertionError);
 });
 
 for (const contentWidth of [399, 400]) {
@@ -51,6 +62,9 @@ for (const contentWidth of [399, 400]) {
       const movedSteer = structuredClone(good);
       movedSteer.menuVerbs.steer = inlineSteer;
       assert.throws(() => assertComposerPlacement(movedSteer, expected), assert.AssertionError);
+      const narrowAttach = structuredClone(good);
+      narrowAttach.currentWork.controlGeometry["composer-attach"].width = 43;
+      assert.throws(() => assertComposerPlacement(narrowAttach, expected), assert.AssertionError);
     });
   }
 }
@@ -62,6 +76,9 @@ test("placement rejects overflow, overlapping controls and wrapped verbs", () =>
     },
     (m) => {
       m.currentWork.controlsDoNotOverlap = false;
+    },
+    (m) => {
+      m.currentWork.composerFitsPane = false;
     },
     (m) => {
       m.currentWork.verbCluster.top = 40;

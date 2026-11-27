@@ -30,8 +30,8 @@ const (
 	// formatVersion is the sidecar's layout. projectionID names the projection
 	// its records reproduce; either changing rebuilds every index.
 	formatVersion = 8
-	// Accepted bare replies and quiet communicate yields change the items.
-	projectionID = "transcript-read-model-v12"
+	// Echo attachment targets visible prose rather than trailing whitespace.
+	projectionID = "transcript-read-model-v16"
 
 	// tailBytes is how much of the covered prefix's end validation compares,
 	// the check the attention fold cursor uses (agent/session_attention.go).
@@ -1357,9 +1357,6 @@ func (x *Index) buildNew(length int64, incarnation string) error {
 	return nil
 }
 
-// removeOtherBuilds deletes every build but the live one. A reader in another
-// process may still hold an old one's files open; where the platform refuses
-// the removal, the next rebuild tries again.
 func (x *Index) removeOtherBuilds() {
 	entries, err := os.ReadDir(x.dir)
 	if err != nil {

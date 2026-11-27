@@ -7,21 +7,30 @@
 // glyphs, and their counts come from the one ACTIVITY_TABS table - the same
 // table the status bar's chips read, so the two surfaces cannot drift.
 
-import { useCallback, useEffect, useMemo, useRef } from "react";
+import { type CSSProperties, useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
 import { AnimatePresence, m, spatialExitTransition, spatialTransition } from "../../motion";
 import { ActivityBodyClock } from "../../panes/session/chrome/activityTime";
 import { popAgentCascade } from "../../panes/zoom/actions";
 import { cascadeOrigin, cascadeOriginRef } from "../../panes/zoom/inspectionOrigin";
 import { deriveCascadePath, parseZoomParams } from "../../panes/zoom/intent";
 import { navigationStore, useNavigationStore } from "../../stores/navigation/store";
+import {
+  clampOverviewWidth,
+  OVERVIEW_WIDTH_DEFAULT,
+  OVERVIEW_WIDTH_MIN,
+  overviewWidthMax,
+  usePrefsStore,
+} from "../../stores/prefs";
 import { useSessionActivity, useSubagentCounts } from "../../stores/sessionActivity";
+import { useThreadsStore } from "../../stores/threads";
 import { EntityViewsProvider, sessionEntityViews } from "../../transcriptDisplay/entityViews";
-import { CloseIcon, FocusScope, IconButton, SegmentedControl } from "../../widgets";
+import { CloseIcon, FocusScope, IconButton, type TabOption, Tabs } from "../../widgets";
 import { DisclosurePersistenceContext } from "../../widgets/disclosure/disclosureStore";
-import { tabbable } from "../../widgets/focusscope/tabbable";
 import { requireClass } from "../../widgets/internal/requireClass";
+import { EdgeResizeHandle } from "../EdgeResizeHandle";
 import { ScopeCrumbs } from "../statusbar/ScopeCrumbs";
 import { type ActivityTab, deriveScope } from "../statusbar/statusScope";
+import { isMobileViewport } from "../useIsMobile";
 import { useWorkspaceStore, workspaceStore } from "../workspace";
 import { ActivityViewport } from "./ActivityViewport";
 import styles from "./activitybar.module.css";
@@ -33,27 +42,81 @@ import {
 } from "./activitySidebarStore";
 import { ACTIVITY_TABS, activityTabSpec } from "./activityTabs";
 
+// Custom property read by activitybar.module.css's `.sidebar`. Set inline on
+// render from persisted overviewWidth and imperatively mid-drag.
+export const OVERVIEW_WIDTH_PROPERTY = "--overview-width";
+
 const CLASS = {
   sidebar: requireClass(styles.sidebar, "activitybar.module.css", "sidebar"),
   sidebarMobile: requireClass(styles.sidebarMobile, "activitybar.module.css", "sidebarMobile"),
   scope: requireClass(styles.scope, "activitybar.module.css", "scope"),
   pending: requireClass(styles.pending, "activitybar.module.css", "pending"),
   head: requireClass(styles.head, "activitybar.module.css", "head"),
-  tabs: requireClass(styles.tabs, "activitybar.module.css", "tabs"),
   body: requireClass(styles.body, "activitybar.module.css", "body"),
   focusBody: requireClass(styles.focusBody, "activitybar.module.css", "focusBody"),
 };
 
+// AnimatePresence renders the exiting aside from the element captured while
+// `open` was still true, so subscribing inside the child re-arms entry focus
+// when the store closes and reopens during that exit.
+function OverviewTabs({
+  value,
+  options,
+  panelId,
+  tabDomId,
+  entryFocus,
+}: {
+  value: ActivityTab;
+  options: readonly TabOption<ActivityTab>[];
+  panelId: string;
+  tabDomId(id: ActivityTab): string;
+  entryFocus: boolean;
+}) {
+  const open = useActivitySidebarStore((state) => state.open);
+  return (
+    <Tabs<ActivityTab>
+      label="Overview kind"
+      value={value}
+      options={options}
+      onChange={(next) => activitySidebarStore.getState().setTab(next)}
+      panelId={panelId}
+      tabDomId={tabDomId}
+      autoFocusSelected={entryFocus && open}
+      focusTrigger={open}
+    />
+  );
+}
+
 export function ActivitySidebar({ mobile = false }: { mobile?: boolean }) {
   const open = useActivitySidebarStore((state) => state.open);
   const tab = useActivitySidebarStore((state) => state.tab);
+  const overviewWidth = usePrefsStore((state) => state.overviewWidth);
+  const setOverviewWidth = usePrefsStore((state) => state.setOverviewWidth);
+  const [viewportWidth, setViewportWidth] = useState<number | undefined>(() =>
+    typeof window === "undefined" ? undefined : window.innerWidth,
+  );
+  const idPrefix = useId();
+  const tabPanelId = `${idPrefix}-panel`;
+  const tabDomId = (id: ActivityTab) => `${idPrefix}-tab-${id}`;
   const sidebar = useRef<HTMLElement>(null);
   const returnFrame = useRef<number | null>(null);
+  useEffect(() => {
+    if (mobile || !open) return;
+    const measure = () => setViewportWidth(window.innerWidth);
+    measure();
+    window.addEventListener("resize", measure);
+    return () => window.removeEventListener("resize", measure);
+  }, [mobile, open]);
+  const maxWidth = overviewWidthMax(viewportWidth);
+  const displayWidth = clampOverviewWidth(overviewWidth, viewportWidth);
   useEffect(
     () => () => {
       if (returnFrame.current !== null) cancelAnimationFrame(returnFrame.current);
+      // The dock is desktop-only: a teardown that lands in the phone host ends
+      // the inspection rather than reopening it as the phone's blocking Overview.
+      if (!mobile && isMobileViewport()) activitySidebarStore.getState().close();
     },
-    [],
+    [mobile],
   );
   const close = useCallback(() => {
     const focusInside = sidebar.current?.contains(document.activeElement);
@@ -78,16 +141,6 @@ export function ActivitySidebar({ mobile = false }: { mobile?: boolean }) {
   useEffect(() => {
     if (open && ref !== null) activitySidebarStore.getState().retainOpenView(ref);
   }, [open, ref]);
-  useEffect(() => {
-    if (!open || !mobile || ref === null) return;
-    const frame = requestAnimationFrame(() => {
-      const element = sidebar.current;
-      if (!element || !activitySidebarStore.getState().open) return;
-      const selected = element.querySelector<HTMLElement>('[role="radio"][aria-checked="true"]');
-      (selected ?? tabbable(element)[0])?.focus();
-    });
-    return () => cancelAnimationFrame(frame);
-  }, [open, mobile, ref]);
   const { snapshot } = useSessionActivity(open ? ref : null);
   // The watch detail resolves entity names from the evidence the session
   // transcript beside this surface already loaded. Only the Watches tab
@@ -98,13 +151,16 @@ export function ActivitySidebar({ mobile = false }: { mobile?: boolean }) {
     [open, tab, ref, snapshot],
   );
   const subagents = useSubagentCounts(open ? ref : null);
+  const linksCount = useThreadsStore((state) =>
+    open && ref !== null ? (state.threads.get(ref)?.sessionUrls.length ?? null) : null,
+  );
   // Closed derives nothing: the sidebar is mounted for the whole desktop
   // session, and a location lookup plus recursive walk per polling update
   // duplicates the StatusBar's own derivation for a surface nothing shows.
   // biome-ignore lint/correctness/useExhaustiveDependencies: `resources` is the memo's invalidation key, not a value the memo reads (the store is read imperatively inside)
   const scope = useMemo(() => {
     if (!open || ref === null) return null;
-    const derived = deriveScope(navigationStore.getState(), ref, snapshot, subagents);
+    const derived = deriveScope(navigationStore.getState(), ref, snapshot, subagents, linksCount);
     if (focusedPane?.type !== "sessionZoom" || !derived.ancestryKnown) return derived;
     const params = parseZoomParams(focusedPane.params);
     if (!params) return derived;
@@ -132,8 +188,17 @@ export function ActivitySidebar({ mobile = false }: { mobile?: boolean }) {
     // A held parent column keeps its whole ancestry, whose origin crumb routes
     // to the retained origin pane instead.
     return { ...derived, path: leaf ? path.filter((crumb) => crumb.ref !== originRef) : path };
-  }, [open, resources, ref, snapshot, subagents, focusedPane]);
+  }, [open, resources, ref, snapshot, subagents, linksCount, focusedPane]);
   const Body = scope === null ? null : activityTabSpec(tab).Body;
+  const tabOptions =
+    scope === null
+      ? []
+      : ACTIVITY_TABS.map((spec) => ({
+          value: spec.id,
+          label: spec.label,
+          detail: spec.tabDetail?.(scope.counts),
+          accessibleLabel: spec.chipLabel(scope.counts),
+        }));
   // Resolved once per mount: spatialTransition reads getComputedStyle (a
   // style pass), and the token changes with the theme at most, so paying
   // that read on every render taxes each scope change for nothing.
@@ -162,6 +227,7 @@ export function ActivitySidebar({ mobile = false }: { mobile?: boolean }) {
         <m.aside
           ref={sidebar}
           className={mobile ? CLASS.sidebarMobile : CLASS.sidebar}
+          style={mobile ? undefined : ({ [OVERVIEW_WIDTH_PROPERTY]: `${displayWidth}px` } as CSSProperties)}
           // The Slide recipe: in from the right edge it lives on and back out
           // to it, by the sidebar's own width.
           initial={{ x: "100%" }}
@@ -170,70 +236,78 @@ export function ActivitySidebar({ mobile = false }: { mobile?: boolean }) {
           transition={transition}
           data-testid="activity-sidebar"
           aria-label="Overview"
+          // The phone shell overlays the one stacked pane with focus trapped:
+          // a modal dialog there, the non-modal Overview region on desktop.
+          role={mobile ? "dialog" : undefined}
+          aria-modal={mobile ? true : undefined}
         >
-          <FocusScope trap={mobile} autoFocus={false}>
-            <div className={CLASS.focusBody}>
-              <div className={CLASS.head}>
-                <div className={CLASS.scope}>
-                  <ScopeCrumbs
-                    path={scope.path}
-                    hierarchy
-                    onNavigate={
-                      focusedPane?.type === "sessionZoom"
-                        ? (ancestor) => {
-                            // The origin conversation never renders inside a
-                            // separated inspector's cascade, and selecting it
-                            // there is refused: its crumb routes to the
-                            // retained origin pane instead of doing nothing.
-                            const origin =
-                              cascadeOriginRef(focusedPane) === ancestor ? cascadeOrigin(focusedPane) : null;
-                            if (origin) {
-                              workspaceStore.getState().focusPane(origin.id);
-                              return;
-                            }
-                            popAgentCascade(focusedPane.id, ancestor);
+          <FocusScope className={CLASS.focusBody} trap={mobile} autoFocus={false}>
+            <div className={CLASS.head}>
+              <div className={CLASS.scope}>
+                <ScopeCrumbs
+                  path={scope.path}
+                  hierarchy
+                  onNavigate={
+                    focusedPane?.type === "sessionZoom"
+                      ? (ancestor) => {
+                          // The origin conversation never renders inside a
+                          // separated inspector's cascade, and selecting it
+                          // there is refused: its crumb routes to the
+                          // retained origin pane instead of doing nothing.
+                          const origin = cascadeOriginRef(focusedPane) === ancestor ? cascadeOrigin(focusedPane) : null;
+                          if (origin) {
+                            workspaceStore.getState().focusPane(origin.id);
+                            return;
                           }
-                        : undefined
-                    }
-                  />
-                  {!scope.ancestryKnown ? <span className={CLASS.pending}>Finding session context…</span> : null}
-                </div>
-                <IconButton label="Close Overview" icon={<CloseIcon />} variant="quiet" size="sm" onClick={close} />
-              </div>
-              <div className={CLASS.tabs}>
-                <SegmentedControl<ActivityTab>
-                  label="Overview kind"
-                  hideLabel
-                  size="sm"
-                  fullWidth
-                  value={tab}
-                  onChange={(next) => activitySidebarStore.getState().setTab(next)}
-                  options={ACTIVITY_TABS.map((spec) => ({
-                    value: spec.id,
-                    label: spec.label,
-                    detail: spec.tabDetail?.(scope.counts),
-                    accessibleLabel: spec.chipLabel(scope.counts),
-                  }))}
+                          popAgentCascade(focusedPane.id, ancestor);
+                        }
+                      : undefined
+                  }
                 />
+                {!scope.ancestryKnown ? <span className={CLASS.pending}>Finding session context…</span> : null}
               </div>
-              <DisclosurePersistenceContext.Provider value={JSON.stringify([scope.leaf.ref, tab])}>
-                <ActivityBodyClock>
-                  {(now) => (
-                    <EntityViewsProvider entities={entities} ownerRef={ref ?? undefined}>
-                      <ActivityViewport
-                        key={JSON.stringify([scope.leaf.ref, tab])}
-                        sessionRef={scope.leaf.ref}
-                        tab={tab}
-                        className={CLASS.body}
-                      >
-                        {Body === null ? null : <Body scope={scope} now={now} />}
-                      </ActivityViewport>
-                    </EntityViewsProvider>
-                  )}
-                </ActivityBodyClock>
-              </DisclosurePersistenceContext.Provider>
+              <IconButton label="Close Overview" icon={<CloseIcon />} variant="quiet" size="sm" onClick={close} />
             </div>
+            <OverviewTabs
+              key={scope.leaf.ref}
+              value={tab}
+              options={tabOptions}
+              panelId={tabPanelId}
+              tabDomId={tabDomId}
+              entryFocus={mobile}
+            />
+            <DisclosurePersistenceContext.Provider value={JSON.stringify([scope.leaf.ref, tab])}>
+              <ActivityBodyClock>
+                {(now) => (
+                  <EntityViewsProvider entities={entities} ownerRef={ref ?? undefined}>
+                    <ActivityViewport
+                      key={JSON.stringify([scope.leaf.ref, tab])}
+                      sessionRef={scope.leaf.ref}
+                      tab={tab}
+                      className={CLASS.body}
+                      panel={{ id: tabPanelId, labelledBy: tabDomId(tab) }}
+                    >
+                      {Body === null ? null : <Body scope={scope} now={now} />}
+                    </ActivityViewport>
+                  </EntityViewsProvider>
+                )}
+              </ActivityBodyClock>
+            </DisclosurePersistenceContext.Provider>
           </FocusScope>
+          {!mobile ? (
+            <EdgeResizeHandle
+              edge="left"
+              width={displayWidth}
+              minWidth={OVERVIEW_WIDTH_MIN}
+              maxWidth={maxWidth}
+              defaultWidth={OVERVIEW_WIDTH_DEFAULT}
+              cssProperty={OVERVIEW_WIDTH_PROPERTY}
+              label="Resize Overview"
+              testId="overview-resize-handle"
+              onCommit={setOverviewWidth}
+              targetRef={sidebar}
+            />
+          ) : null}
         </m.aside>
       ) : null}
     </AnimatePresence>

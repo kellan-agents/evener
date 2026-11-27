@@ -17,11 +17,11 @@ func TestItemTurnsFromFileProjectsLaunchSystemPromptSavedInMeta(t *testing.T) {
 	const launchPrompt = "You are the child agent."
 	path := writeLaunchPromptSession(t, "", launchPrompt)
 
-	turns, err := ItemTurnsFromFile(path, 1<<20, nil)
+	proj, err := ItemTurnProjectionFromFile(path, 1<<20, nil)
 	if err != nil {
-		t.Fatalf("ItemTurnsFromFile: %v", err)
+		t.Fatalf("ItemTurnProjectionFromFile: %v", err)
 	}
-	item := preludeSystemPromptItem(t, turns)
+	item := preludeSystemPromptItem(t, proj.Turns)
 	if item.Text != launchPrompt {
 		t.Fatalf("prelude system prompt = %q, want the meta launch prompt %q", item.Text, launchPrompt)
 	}
@@ -35,11 +35,11 @@ func TestItemTurnsFromFileProjectsLaunchSystemPromptSavedInMeta(t *testing.T) {
 func TestItemTurnsFromFileKeepsHeaderPromptOverMetaFallback(t *testing.T) {
 	path := writeLaunchPromptSession(t, "You are the header prompt.", "You are the meta fallback.")
 
-	turns, err := ItemTurnsFromFile(path, 1<<20, nil)
+	proj, err := ItemTurnProjectionFromFile(path, 1<<20, nil)
 	if err != nil {
-		t.Fatalf("ItemTurnsFromFile: %v", err)
+		t.Fatalf("ItemTurnProjectionFromFile: %v", err)
 	}
-	if item := preludeSystemPromptItem(t, turns); item.Text != "You are the header prompt." {
+	if item := preludeSystemPromptItem(t, proj.Turns); item.Text != "You are the header prompt." {
 		t.Fatalf("prelude system prompt = %q, want the header prompt", item.Text)
 	}
 }
@@ -53,10 +53,11 @@ func TestItemTurnsFromFileDoesNotProjectRenderFailureProseFromMeta(t *testing.T)
 	project := func(schema.Turn, string, int) []appwire.ThreadItem {
 		return []appwire.ThreadItem{{Type: "userMessage", Text: "hello"}}
 	}
-	turns, err := ItemTurnsFromFile(path, 1<<20, project)
+	proj, err := ItemTurnProjectionFromFile(path, 1<<20, project)
 	if err != nil {
-		t.Fatalf("ItemTurnsFromFile: %v", err)
+		t.Fatalf("ItemTurnProjectionFromFile: %v", err)
 	}
+	turns := proj.Turns
 	if len(turns) == 0 {
 		t.Fatal("no turns projected: the assertion below would pass vacuously")
 	}
@@ -79,8 +80,8 @@ func writeLaunchPromptSession(t *testing.T, headerPrompt, metaPrompt string) str
 	if err != nil {
 		t.Fatalf("transcript.NewWriter: %v", err)
 	}
-	if err := tw.Append(schema.Turn{Kind: schema.TurnUserInput, Message: llm.User("hello")}); err != nil {
-		t.Fatalf("Append: %v", err)
+	if _, err := tw.Record(schema.Turn{Kind: schema.TurnUserInput, Message: llm.User("hello")}, transcript.RecordOptions{Door: transcript.DoorBuffered}); err != nil {
+		t.Fatalf("Record: %v", err)
 	}
 	if err := tw.Close(); err != nil {
 		t.Fatalf("Close: %v", err)

@@ -38,14 +38,11 @@ const jobIDAllocationAttempts = 8
 // lookup with errors.Is instead of matching the model-facing message text.
 var errJobNotFoundSentinel = errors.New("job not found")
 
-const maxPersistedStructuredResultJSONBytes = 1024 * 1024
-
 const (
 	structuredResultReasonSchemaValidationFailed = "schema_validation_failed"
 	structuredResultReasonSchemaResultMissing    = "schema_result_missing"
 	structuredResultReasonSchemaResultTooLarge   = "schema_result_too_large"
 	structuredResultReasonSchemaCaptureFailed    = "schema_capture_failed"
-	structuredResultReasonProjectionTooLarge     = "projection_too_large"
 )
 
 type terminalRecordPersistError struct {
@@ -198,6 +195,13 @@ type jobManager struct {
 	// (still durable, not yet Delivered) and re-enqueues it during the drain's
 	// 250ms recheck, reproducing the issue-#140 finalization provider-request leak.
 	testOnlyAfterNotifyPendingAppend func(jobID string)
+	// testOnlyAfterStableAttentionArm fires inside persistStableShellAttention
+	// after it has armed the receiver's attention, but BEFORE it acknowledges
+	// the notification as delivered and before the job leaves the running map.
+	// It is nil in production; deterministic tests hold the finalization here to
+	// prove a receiver woken by the arm never treats the already-told completion
+	// as drainable work.
+	testOnlyAfterStableAttentionArm func(jobID string)
 	// testOnlyAfterRematerializeDurableLoad fires inside rematerializeDurablePendings
 	// after it has read the durable records, before it decides what to re-enqueue.
 	// It is nil in production; deterministic tests use it to hold a rematerialize
@@ -446,19 +450,17 @@ func watchGuaranteesFutureWakeLocked(cfg *watchConfig, run *runningJob) bool {
 }
 
 type runningJob struct {
-	rec                     *jobstore.JobRecord
-	output                  *jobstore.OutputStore
-	signal                  func()
-	done                    chan struct{}
-	doneOnce                sync.Once
-	durableStarted          bool
-	stopStatus              jobstore.Status
-	stopReason              string
-	structured              any
-	structuredCaptureFailed bool
-	terminal                *terminalJob
-	finalize                *finalizeAttempt
-	forwardDisabled         bool
+	rec             *jobstore.JobRecord
+	output          *jobstore.OutputStore
+	signal          func()
+	done            chan struct{}
+	doneOnce        sync.Once
+	durableStarted  bool
+	stopStatus      jobstore.Status
+	stopReason      string
+	terminal        *terminalJob
+	finalize        *finalizeAttempt
+	forwardDisabled bool
 	// completion distinguishes a durable terminal close of done from teardown
 	// abandonment. Stop receipts must not treat both channel closes as the same
 	// lifecycle proof.
@@ -1401,6 +1403,11 @@ func (jm *jobManager) reconcileLostJobsWithLoad(loadJobs func() (map[string]*job
 
 	for _, finished := range jobstore.Reconcile(localRecs, live, jm.now()) {
 		rec := localRecs[finished.JobID]
+		// The runtime that owned this job is gone. A background shell job's
+		// process group survived it, adopted by init: reap it before recording
+		// the loss, so the job does not outlive its session (#4843). The reap
+		// re-verifies the group's start time, so a recycled pgid stays safe.
+		reapBackgroundProcessGroup(rec)
 		// A retired delegate's output belongs to the runtime that wrote it and is
 		// never read, so its unreadable artifacts cannot stop the restore.
 		if string(rec.Type) != delegateResourceType {
@@ -1770,9 +1777,6 @@ func (jm *jobManager) writeFinishJob(run *runningJob, status jobstore.Status, re
 	if _, total, _, err := run.output.Tail(0); err == nil {
 		outputBytes = total
 	}
-	jm.mu.Lock()
-	structured, structuredValid, structuredReason := boundedStructuredResult(run.structured, nil, run.structuredCaptureFailed)
-	jm.mu.Unlock()
 
 	endedAt := jm.now()
 	terminal := &terminalJob{
@@ -1784,21 +1788,18 @@ func (jm *jobManager) writeFinishJob(run *runningJob, status jobstore.Status, re
 		generation:  jobstore.NewTerminalGeneration(),
 	}
 	finished := jobstore.Event{
-		Kind:                   jobstore.EventJobFinished,
-		TS:                     endedAt,
-		JobID:                  run.rec.JobID,
-		Status:                 terminal.status,
-		Reason:                 terminal.reason,
-		ExhaustionBudget:       terminal.exhaustionBudget,
-		ExhaustionLimit:        terminal.exhaustionLimit,
-		ExitCode:               terminal.exitCode,
-		EndedAt:                &endedAt,
-		OutputBytes:            terminal.outputBytes,
-		StructuredResult:       structured,
-		StructuredResultValid:  structuredValid,
-		StructuredResultReason: structuredReason,
-		TerminalGen:            terminal.generation,
-		Provenance:             provenance.Clone(run.rec.Provenance),
+		Kind:             jobstore.EventJobFinished,
+		TS:               endedAt,
+		JobID:            run.rec.JobID,
+		Status:           terminal.status,
+		Reason:           terminal.reason,
+		ExhaustionBudget: terminal.exhaustionBudget,
+		ExhaustionLimit:  terminal.exhaustionLimit,
+		ExitCode:         terminal.exitCode,
+		EndedAt:          &endedAt,
+		OutputBytes:      terminal.outputBytes,
+		TerminalGen:      terminal.generation,
+		Provenance:       provenance.Clone(run.rec.Provenance),
 	}
 	terminal.finished = finished
 	if err := jm.appendEvent(finished); err != nil {
@@ -1815,9 +1816,6 @@ func (jm *jobManager) writeFinishJob(run *runningJob, status jobstore.Status, re
 		run.rec.ExitCode = terminal.exitCode
 		run.rec.EndedAt = &terminal.endedAt
 		run.rec.OutputBytes = terminal.outputBytes
-		run.rec.StructuredResult = structured
-		run.rec.StructuredResultValid = structuredValid
-		run.rec.StructuredResultReason = structuredReason
 		run.rec.TerminalGen = terminal.generation
 	}
 	jm.mu.Unlock()
@@ -1881,38 +1879,6 @@ func (jm *jobManager) appendStartForwardFailure(jobID string, output *jobstore.O
 		TerminalGen: jobstore.NewTerminalGeneration(),
 		Provenance:  provenance.Clone(p),
 	})
-}
-
-func boundedStructuredResult(value any, resultSchema any, captureFailed bool) (any, *bool, string) {
-	schemaRequested := resultSchema != nil
-	if value == nil {
-		if captureFailed {
-			valid := false
-			return nil, &valid, structuredResultReasonSchemaCaptureFailed
-		}
-		if schemaRequested {
-			valid := false
-			return nil, &valid, structuredResultReasonSchemaResultMissing
-		}
-		return nil, nil, ""
-	}
-	valid := true
-	b, err := json.Marshal(value)
-	if err != nil || len(b) > maxPersistedStructuredResultJSONBytes {
-		valid = false
-		reason := structuredResultReasonSchemaCaptureFailed
-		if err == nil {
-			reason = structuredResultReasonSchemaResultTooLarge
-		}
-		return nil, &valid, reason
-	}
-	if schemaRequested {
-		if err := validateStructuredResult(value, resultSchema); err != nil {
-			valid = false
-			return nil, &valid, structuredResultReasonSchemaValidationFailed
-		}
-	}
-	return value, &valid, ""
 }
 
 func validateStructuredResult(value any, resultSchema any) (err error) {
@@ -2136,8 +2102,16 @@ func (jm *jobManager) persistStableShellAttention(jobID string) (string, *Sessio
 	if _, err := owner.appendDelegateNotificationDurably(attentionID, content); err != nil {
 		return "", owner, err
 	}
+	// Arm before acknowledging delivery: a failed arm must leave the record
+	// NotifyPending so retry and recovery know the wake did not publish. Once
+	// the arm returns, the receiver can wake and ask whether this job is still
+	// drainable work; outstandingDrainJobIDsByBackground reads the committed
+	// attention row rather than waiting for the acknowledgement below.
 	if err := owner.armDelegateAttention(attentionID); err != nil {
 		return "", owner, err
+	}
+	if hook := jm.testOnlyAfterStableAttentionArm; hook != nil {
+		hook(record.JobID)
 	}
 	if record.NotifyState != jobstore.NotifyDelivered {
 		delivered := jobstore.Event{

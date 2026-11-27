@@ -22,10 +22,7 @@ import (
 // a boundary triple and one record per pair the test asks for.
 func operationsTestStore(t *testing.T, hosts []hostreg.Host) *hostops.Store {
 	t.Helper()
-	store, err := hostops.Open(hostops.StorePath(t.TempDir()))
-	if err != nil {
-		t.Fatalf("hostops.Open: %v", err)
-	}
+	path := hostops.StorePath(t.TempDir())
 	boundaries := make(map[string]hostops.Boundary, len(hosts))
 	for _, host := range hosts {
 		boundaries[host.Name] = hostops.Boundary{
@@ -34,8 +31,10 @@ func operationsTestStore(t *testing.T, hosts []hostreg.Host) *hostops.Store {
 			PresenceEpoch: host.PresenceEpoch,
 		}
 	}
-	if err := store.MirrorBoundaries(boundaries, nil); err != nil {
-		t.Fatalf("MirrorBoundaries: %v", err)
+	writeRawHostOpsBoundaries(t, path, boundaries)
+	store, err := hostops.Open(path, hostops.RetentionPolicy{})
+	if err != nil {
+		t.Fatalf("hostops.Open: %v", err)
 	}
 	return store
 }
@@ -43,17 +42,18 @@ func operationsTestStore(t *testing.T, hosts []hostreg.Host) *hostops.Store {
 // seedOperationRecord persists one pending operation record for host.
 func seedOperationRecord(t *testing.T, store *hostops.Store, host, operationID string, generation uint64, incarnationID string) hostops.Record {
 	t.Helper()
-	record, err := store.Create(hostops.NewRecord{
+	outcome, err := store.Create(hostops.OperationCreateRequest{
 		ClientOperationID: operationID,
 		Host:              host,
 		Kind:              hostops.KindDeploy,
-		Generation:        generation,
-		IncarnationID:     incarnationID,
+		Pair:              hostops.OperationPair{Generation: generation, IncarnationID: incarnationID},
+		BootID:            "test-boot",
+		SequenceBefore:    store.Sequence(),
 	})
 	if err != nil {
 		t.Fatalf("Create(%s): %v", host, err)
 	}
-	return record
+	return outcome.Record
 }
 
 // TestHostOperationsReadsThroughTheRealServer is the proof the read is wired:
@@ -216,14 +216,13 @@ func TestHostOperationsDetailCarriesTheCompactedMarker(t *testing.T) {
 	entry.Generation = 2
 	entry.IncarnationID = "inc-m4"
 	entry.PresenceEpoch = 3
-	store, err := hostops.OpenWithRetention(hostops.StorePath(t.TempDir()), hostops.RetentionPolicy{TerminalPerHost: 1})
-	if err != nil {
-		t.Fatalf("OpenWithRetention: %v", err)
-	}
-	if err := store.MirrorBoundaries(map[string]hostops.Boundary{
+	storePath := hostops.StorePath(t.TempDir())
+	writeRawHostOpsBoundaries(t, storePath, map[string]hostops.Boundary{
 		"m4": {Generation: 2, IncarnationID: "inc-m4", PresenceEpoch: 3},
-	}, nil); err != nil {
-		t.Fatalf("MirrorBoundaries: %v", err)
+	})
+	store, err := hostops.Open(storePath, hostops.RetentionPolicy{TerminalPerHost: 1})
+	if err != nil {
+		t.Fatalf("hostops.Open: %v", err)
 	}
 	finishSeedOperation(t, store, seedOperationRecord(t, store, "m4", "op-compacted", 2, "inc-m4"))
 	finishSeedOperation(t, store, seedOperationRecord(t, store, "m4", "op-kept", 2, "inc-m4"))
