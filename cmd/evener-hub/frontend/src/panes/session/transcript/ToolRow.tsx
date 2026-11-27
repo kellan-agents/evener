@@ -27,11 +27,10 @@ const ROW_ICON_SIZE = 14;
 //   summaryWhenExpanded as the summary text), so the call never appears
 //   twice and the chevron keeps its line.
 //
-//   - the kind icon sits in a SEAT beside the rationale line: a rounded
-//     --field square in the column the row reserves in its own left padding
-//     (toolcallitem.module.css's .call), at every width. The kind is ambient
-//     context, not content, so it stays out of the text and the row's two
-//     lines share one left edge beside it;
+//   - the kind icon sits bare beside the rationale line, in the column the
+//     row reserves in its own left padding (toolcallitem.module.css's .call),
+//     at every width. The kind is ambient context, not content, so it stays
+//     out of the text and the row's two lines share one left edge beside it;
 //   - a COLLAPSED row with both an intent and a summary STACKS them: the
 //     intent (the agent's stated rationale, italic) on the first line, the
 //     verb/target summary demoted to a quiet second line (truncation
@@ -76,6 +75,7 @@ const ROW_ICON_SIZE = 14;
 // A row with no intent is a single line: summary, then affordances, then
 // the chevron if there is something to expand.
 import { type ComponentProps, Fragment, type ReactNode, useId, useMemo } from "react";
+import { MIDDLE_TRUNCATION_HEAD_SHARE, walkTruncationCut } from "../../../transcriptDisplay/middleTruncate";
 import { Chevron, FailureGlyph, ToolIcon, type ToolIconKind } from "../../../widgets";
 import { requireClass } from "../../../widgets/internal/requireClass";
 import { EntityRef } from "./EntityRef";
@@ -357,7 +357,7 @@ function spanContaining(spans: EntitySpan[], cut: number): EntitySpan | undefine
  * middle truncation. */
 function middleTruncationCut(measure: SummaryMeasure): number {
   const { total, spans } = measure;
-  let cut = Math.ceil(total * 0.6);
+  let cut = Math.ceil(total * MIDDLE_TRUNCATION_HEAD_SHARE);
   const straddled = spanContaining(spans, cut);
   if (straddled) {
     const preferStart = cut - straddled.start <= straddled.end - cut && straddled.start > 0;
@@ -372,28 +372,7 @@ function middleTruncationCut(measure: SummaryMeasure): number {
  * walk enters an id, back to that id's start - so no character the browser
  * would collapse sits at a span edge and no id is ever split. */
 function walkOffWhitespace(measure: SummaryMeasure, cut: number): number {
-  const { chars, total, spans } = measure;
-  const isSpace = (index: number) => /\s/.test(chars[index] ?? "");
-  let position = cut;
-  while (position > 0 && position < total) {
-    const inside = spanContaining(spans, position);
-    if (inside) {
-      position = inside.start;
-      continue;
-    }
-    if (isSpace(position - 1) || isSpace(position)) {
-      position -= 1;
-      continue;
-    }
-    break;
-  }
-  return position;
-}
-
-/** The collapsed line's middle-truncation cut over atomic segments: ~60% of the
- * code points, never inside an id and never adjacent to whitespace. */
-function middleSplit(measure: SummaryMeasure): number {
-  return walkOffWhitespace(measure, middleTruncationCut(measure));
+  return walkTruncationCut(measure.chars, cut, (position) => spanContaining(measure.spans, position)?.start);
 }
 
 /** Splits the segment list at a code-point boundary, preserving order. The cut
@@ -634,7 +613,7 @@ export function ToolRow({
     if (!needsClampedSummary && anchorCut === undefined) return undefined;
     const measure = measureSummary(summary, segments);
     return {
-      clampCut: needsClampedSummary ? middleSplit(measure) : undefined,
+      clampCut: needsClampedSummary ? walkOffWhitespace(measure, middleTruncationCut(measure)) : undefined,
       anchor: anchorCut === undefined ? undefined : seatAnchor(segments, measure, anchorCut),
     };
   }, [anchorCut, needsClampedSummary, segments, summary]);
@@ -651,7 +630,7 @@ export function ToolRow({
       data-open={(summaryToggle ? summaryOpen : expanded) ? "true" : "false"}
       data-testid="tool-row-chevron"
     >
-      <Chevron />
+      <Chevron open={summaryToggle ? summaryOpen : expanded} />
     </span>
   ) : null;
   // The failure mark: a cross on the kind icon's bottom-right corner, never a
@@ -684,8 +663,8 @@ export function ToolRow({
   // The kind icon sits in the row's seat column, beside the rationale line
   // and out of the text. It is the row's first flex item: the .rowIconSlot
   // rule pulls it one --speaker-gutter to the left, into the padding the tool
-  // row (.call) reserves for it, paints the seat's ground behind it, and
-  // pins it to the first line (the rationale) at all times.
+  // row (.call) reserves for it, and pins it to the first line (the rationale)
+  // at all times.
   //
   // The slot is the badge's POSITIONING CONTEXT and the row's flex item. A
   // clean row renders it with only the seat inside, so success costs no extra
@@ -852,7 +831,7 @@ export function ToolRow({
       data-open={expanded ? "true" : "false"}
       data-testid="tool-row-body-chevron"
     >
-      <Chevron />
+      <Chevron open={expanded} />
     </span>
   );
 

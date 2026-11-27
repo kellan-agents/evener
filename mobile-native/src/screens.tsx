@@ -255,6 +255,7 @@ export type Routes = {
 		tier?: "current" | "recent" | "archived";
 	};
 	Hubs: undefined;
+	Workspace: { hubId: string; path: string } | undefined;
 	Sessions: undefined;
 	/** The Hub sheet (spec 12), a modal holding its own stack of pages. */
 	Hub: NavigatorScreenParams<HubRoutes>;
@@ -1431,9 +1432,6 @@ function ConversationScreenView({
 						opacity: !hasConversation ? 0.4 : pressed ? 0.6 : 1,
 					})}
 				>
-					{/* The Android/older-RN fallback for the ⋯ iOS draws as a native
-						    menu (sessionMenu's ellipsis.circle): a symbol, so Dynamic Type
-						    grows it with everything else. */}
 					<SymbolView name="ellipsis" tintColor={colors.text} size={20 * textScale} />
 				</Pressable>
 			),
@@ -1775,6 +1773,8 @@ function ConversationScreenView({
 	});
 	const { findHits, findKey, findCurrent, stepFind, findJumping, findAttempts, findRetryFrame, retryFindMatch } =
 		useFindInSession({
+			hubId: route.params.hubId,
+			sessionRef: route.params.ref,
 			find,
 			setFind,
 			timelineRows,

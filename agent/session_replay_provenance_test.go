@@ -369,11 +369,10 @@ func TestExpandHistory_OpenAIResponses_DifferentProvider_RedactedThinkingAbsent(
 	}
 }
 
-// A scope that carries no target policy (DropThinking false) leaves thinking
-// alone, whatever the protocol: the chat drop is a property of the outgoing
-// target, set by request assembly from the profile (#4563), not a provenance
-// rule that a bare scope can infer.
-func TestExpandHistory_OpenAIChat_ScopeWithoutDropKeepsThinking(t *testing.T) {
+// expandHistory leaves thinking alone for ProtocolOpenAIChat: target-level
+// thinking dropping runs separately in projectThinkingForTarget, not in
+// replayScope provenance filtering.
+func TestExpandHistory_OpenAIChat_KeepsThinking(t *testing.T) {
 	t.Parallel()
 	turns := []schema.Turn{assistantThinkingTurn("anthropic", "claude-opus-4-6", "claude-opus-4-6")}
 	out := expandHistory(turns, replayScope{
@@ -381,7 +380,7 @@ func TestExpandHistory_OpenAIChat_ScopeWithoutDropKeepsThinking(t *testing.T) {
 		InFlightFrom: len(turns), protocolOf: replayProtocolOf,
 	})
 	if !hasContentKind(out, llm.ContentThinking) {
-		t.Fatal("a scope without the target's drop policy must not strip thinking")
+		t.Fatal("expandHistory must not strip thinking for OpenAIChat")
 	}
 }
 
@@ -1054,7 +1053,7 @@ func TestRestoreSession_PrunesRetiredCheapModelAndModelFallbacks(t *testing.T) {
 		if err != nil {
 			t.Fatalf("NewSession for SetModel: %v", err)
 		}
-		if err := sw.SetModel("google-vertex/gemini-2.5-flash"); err != nil {
+		if err := sw.SetModel("", "google-vertex/gemini-2.5-flash"); err != nil {
 			t.Fatalf("SetModel to google-vertex/gemini-2.5-flash with registered override failed: %v", err)
 		}
 		sw.Close()

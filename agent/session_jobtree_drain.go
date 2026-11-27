@@ -102,7 +102,13 @@ func isOwnedDrainJob(rec *jobstore.JobRecord, sessionID string) bool {
 // outstandingDrainJobCount reports how many managed jobs still owe this session
 // a completion notification turn. A managed job counts while it is either still
 // in the running map (not yet finalized) or recorded terminal with an owner
-// notification that is pending but not yet delivered.
+// notification that is pending but not yet delivered. A finalizing job has
+// handed its completion to the owner once its record reads NotifyDelivered or
+// NotifyConsumed, or, for a stable delegate owner, once its exact completion
+// attention is committed or resolved in the delegate store or already presented
+// in the owner's active turn. Any of those states means the wake published or
+// the receiver already presented it, so the job only waits for
+// its running-map delete and no longer counts.
 //
 // Both halves are needed to be race-free against the finalization sequence
 // (jobs.go armFinalizedJob): the running-map membership covers the window from
@@ -120,8 +126,13 @@ func isOwnedDrainJob(rec *jobstore.JobRecord, sessionID string) bool {
 // NotifyPending record is already durable (delete done, its earlier append
 // visible to Load). Loading the store outside the lock would reopen the
 // stale-snapshot window. Store never acquires jm.mu, so jm.mu -> store.mu is a
-// consistent order with no inverse. A store read error is returned, never
-// folded into a zero count: an unreadable store is not quiescence.
+// consistent order with no inverse. The committed-attention probe needs the
+// delegate controller's lock, which never nests inside jm.mu: candidates are
+// snapshotted under jm.mu and probed only after it is released. The probe state
+// is monotonic (uncommitted -> committed -> resolved), so answering it late can
+// only stop counting a job whose completion has already published. A store read
+// error is returned, never folded into a zero count: an unreadable store is not
+// quiescence.
 func (jm *jobManager) outstandingDrainJobCount() (int, error) {
 	ids, err := jm.outstandingDrainJobIDs()
 	return len(ids), err
@@ -138,8 +149,8 @@ func (jm *jobManager) outstandingDrainJobIDs() ([]string, error) {
 }
 
 // outstandingDrainJobIDsByBackground returns outstandingDrainJobIDs together
-// with the subset of them that are LIVE background shells, under a single jm.mu
-// hold so the two lists can never disagree.
+// with the subset of them that are LIVE background shells, read from one
+// running-map snapshot so the two lists can never disagree.
 //
 // background is read off the RUNNING MAP's own record. JobRecord.Background is
 // json:"-" — no event carries it, it is stamped in memory at launch or
@@ -152,17 +163,35 @@ func (jm *jobManager) outstandingDrainJobIDs() ([]string, error) {
 // announcement fire while real progress was one turn away.
 func (jm *jobManager) outstandingDrainJobIDsByBackground() (all, background []string, err error) {
 	jm.mu.Lock()
-	defer jm.mu.Unlock()
 	recs, err := jm.store.Load()
 	if err != nil {
+		jm.mu.Unlock()
 		return nil, nil, err
 	}
+	stableOwner := jm.stableOwner
+	parentDelegateID := jm.parentDelegateID
 	counted := make(map[string]bool)
 	var ids []string
+	finalizing := make(map[string]string)
 	for id, run := range jm.running {
 		if isOwnedDrainJob(run.rec, jm.sessionID) {
+			// The arm that wakes the owner runs while the job is still in the
+			// running map. Once the completion has reached the delegate's
+			// attention rail, the delegate's un-presented attention row keeps
+			// the subtree drainable (subagentHasDrainableWork), so this job must
+			// not also read as work the completion wake still owes. Otherwise
+			// the woken delegate quietly yields instead of sending its report.
+			if rec := recs[id]; rec != nil && run.terminal != nil &&
+				rec.TerminalGen == run.terminal.generation &&
+				(rec.NotifyState == jobstore.NotifyDelivered || rec.NotifyState == jobstore.NotifyConsumed) {
+				continue
+			}
 			counted[id] = true
 			ids = append(ids, id)
+			if stableOwner != nil && parentDelegateID != "" && run.terminal != nil &&
+				run.rec != nil && run.rec.Type == jobstore.JobShell && run.rec.ParentDelegateID == parentDelegateID {
+				finalizing[id] = stableShellAttentionID(id, run.terminal.generation)
+			}
 			// A job whose terminal record exists is finalizing (armFinalizedJob
 			// is between its EventJobFinished and its running-map delete): one
 			// wake from delivery, never an undisposed job to announce.
@@ -184,7 +213,31 @@ func (jm *jobManager) outstandingDrainJobIDsByBackground() (all, background []st
 		// armPendingTerminalNotifications).
 		if isOwnedDrainJob(rec, jm.sessionID) && rec.NotifyState == jobstore.NotifyPending {
 			ids = append(ids, id)
+			if stableOwner != nil && parentDelegateID != "" && rec.Type == jobstore.JobShell &&
+				rec.ParentDelegateID == parentDelegateID && rec.TerminalGen != "" {
+				finalizing[id] = stableShellAttentionID(id, rec.TerminalGen)
+			}
 		}
+	}
+	jm.mu.Unlock()
+	// Probe the delegate store only after releasing jm.mu: the controller lock
+	// must never nest inside the job manager's, and a committed attention row
+	// already means the wake published (the arm commits before it notifies). A
+	// drain recheck can also present an uncommitted row queued by
+	// appendDelegateNotificationDurably before the arm commits, so active-turn
+	// coverage of that attention ID already hands the completion off too.
+	if stableOwner != nil && len(finalizing) > 0 {
+		kept := ids[:0]
+		for _, id := range ids {
+			attentionID, isFinalizingShell := finalizing[id]
+			if isFinalizingShell &&
+				(stableOwner.delegateController.delegateAttentionCommittedOrResolved(parentDelegateID, attentionID) ||
+					stableOwner.hasPresentedAttentionInActiveTurn(attentionID)) {
+				continue
+			}
+			kept = append(kept, id)
+		}
+		ids = kept
 	}
 	return ids, background, nil
 }
@@ -295,6 +348,50 @@ func (s *Session) treeHasOutstandingWork() (bool, error) {
 		}
 	}
 	return s.treeHasOutstandingWorkBesidesOwnJobs()
+}
+
+// subagentHasDrainableWork reports whether a subagent has live owned work or an
+// unpresented automatic delegate attention row (such as a completed owned shell
+// persisted by persistStableShellAttention or a nested delegate update/report)
+// that drainForFinalization will run a notification turn for.
+//
+// treeHasOutstandingWork runs BEFORE reading automatic delegate attention:
+// armFinalizedJob persists stable shell attention before deleting the job from
+// jm.running, so checking running/pending first and persisted attention second
+// closes the handoff window between them. Attention rows already presented in
+// the currently active turn (attentionCoverageActive && attentionCoveredIDs)
+// are excluded because the model already read them and finishAttentionTurn
+// resolves them on turn exit.
+func (s *Session) subagentHasDrainableWork() (bool, error) {
+	outstanding, err := s.treeHasOutstandingWork()
+	if err != nil || outstanding {
+		return outstanding, err
+	}
+	if s == nil || s.owningDelegateID == "" {
+		return false, nil
+	}
+	ids, err := s.automaticDelegateAttentionIDs()
+	if err != nil {
+		return false, err
+	}
+	if len(ids) == 0 {
+		return false, nil
+	}
+	keepAll := !s.communicatedUnblocked()
+	s.attentionMu.Lock()
+	defer s.attentionMu.Unlock()
+	for _, id := range ids {
+		if !keepAll && !isDelegateUpdateAttentionID(id) {
+			continue
+		}
+		if s.attentionCoverageActive {
+			if _, covered := s.attentionCoveredIDs[id]; covered {
+				continue
+			}
+		}
+		return true, nil
+	}
+	return false, nil
 }
 
 // treeHasOutstandingWorkBesidesOwnJobs is treeHasOutstandingWork with this
@@ -1091,7 +1188,7 @@ type keepingDelegateReportKey struct{}
 // already reported; any other error still propagates.
 func (s *Session) keepingReport(process func(context.Context, string, []ImageAttachment, EntryKind) (string, error)) func(context.Context, string, []ImageAttachment, EntryKind) (string, error) {
 	return func(ctx context.Context, input string, images []ImageAttachment, kind EntryKind) (string, error) {
-		reported := s.communicatedUnblocked()
+		reported := s.communicatedSettled()
 		if reported {
 			ctx = context.WithValue(ctx, keepingDelegateReportKey{}, s)
 		}
@@ -1100,7 +1197,7 @@ func (s *Session) keepingReport(process func(context.Context, string, []ImageAtt
 			return res, err
 		}
 		s.mu.Lock()
-		if !s.comm.called || s.comm.stopBlocked {
+		if !s.communicatedSettledLocked() {
 			// The restore replaces the report fields, not the fact that this
 			// input sent a non-terminal update: keeping it makes a later
 			// missing-report reminder acknowledge that update instead of
@@ -1334,6 +1431,12 @@ func (s *Session) drainJobTreeWith(ctx context.Context, recheck <-chan time.Time
 		// and resume restores them; see
 		// TestRootDelegateAttention_PendingContentSurvivesCompactionRestart),
 		// so a request after a compaction or a failed turn still presents it.
+		// An update the last turn showed whose journal resolution failed is
+		// withheld from the predicate below until the retry lands, or the
+		// drain would run a second turn for a message the model already read.
+		if flushErr := s.flushAwaitingDelegateAttentionResolutions(); flushErr != nil {
+			s.warnDelegateAttentionFailed(delegateAttentionResolveLabel, s.owningDelegateID, flushErr)
+		}
 		notificationTurnOwed := s.peekNotifications() > 0 || s.pendingRootDelegateAttention() || s.hasUndrivenDelegateUpdate(drivenUpdates)
 		if s.hasPendingStableSteering() && !notificationTurnOwed {
 			return lastResult, nil
@@ -1365,6 +1468,9 @@ func (s *Session) drainJobTreeWith(ctx context.Context, recheck <-chan time.Time
 			prevOutstanding = true
 			continue
 		}
+		if hook := s.cfg.testOnly.jobTreeDrainBeforeOutstanding; hook != nil {
+			hook(s)
+		}
 		outstanding, err := s.treeHasOutstandingWork()
 		if err != nil {
 			return lastResult, err
@@ -1377,7 +1483,13 @@ func (s *Session) drainJobTreeWith(ctx context.Context, recheck <-chan time.Time
 			// Nothing pending and nothing outstanding anywhere in the subtree — but the
 			// scan above is not a snapshot: if the tree moved while it ran, re-run the
 			// pass instead of trusting the verdict.
-			if treeMoved() {
+			//
+			// The scan is also not the turn gate above: a completion can commit its
+			// delegate attention between that gate and this verdict, making the
+			// finalizing job stop counting before the wake that will drive its
+			// notification turn is raised. Re-read the gate's attention predicate
+			// here so that completion cannot end the drain quiescent.
+			if treeMoved() || s.hasUndrivenDelegateUpdate(drivenUpdates) {
 				continue
 			}
 			// The outstanding scan deliberately excludes forwarded records for

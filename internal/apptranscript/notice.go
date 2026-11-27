@@ -1,6 +1,7 @@
 package apptranscript
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -75,6 +76,9 @@ func IsQuietCommunicate(result *llm.ToolResultData) bool {
 // IsQuietCommunicateState decodes the typed result state shared by replay
 // and the live tool-call end event.
 func IsQuietCommunicateState(raw json.RawMessage) bool {
+	if len(raw) == 0 || !bytes.Contains(raw, []byte("communicate_quiet")) {
+		return false
+	}
 	return schema.IsQuietCommunicateState(raw)
 }
 
@@ -342,4 +346,30 @@ func ApprovalDecisionAnnouncement(notice schema.ApprovalDecisionNotice) NoticeAn
 		}(notice),
 	})
 	return NoticeAnnouncement{EventKind: appwire.ThreadItemEventKindApprovalDecision, Description: "Approval", Text: text, Raw: raw}
+}
+
+// QuietYieldAnnouncement builds the muted notice for a successful quiet
+// communicate turn or bare-text live-work quiet park. When note is empty (such
+// as legacy empty-object records), it falls back to a neutral caption. When
+// companion assistant commentary prose was emitted in the same response (or a
+// multiline bare-text note was normalized to a single paragraph), it rides in Raw under "commentary" so
+// clients keep it inspectable behind the muted notice instead of as an unread
+// chat bubble.
+func QuietYieldAnnouncement(note, commentary string) NoticeAnnouncement {
+	text := strings.TrimSpace(note)
+	if text == "" {
+		text = "Ended turn quietly"
+	}
+	var raw json.RawMessage
+	if trimmed := strings.TrimSpace(commentary); trimmed != "" {
+		raw, _ = json.Marshal(struct {
+			Commentary string `json:"commentary"`
+		}{Commentary: trimmed})
+	}
+	return NoticeAnnouncement{
+		EventKind:   appwire.ThreadItemEventKindQuietYield,
+		Description: "Quiet yield",
+		Text:        text,
+		Raw:         raw,
+	}
 }

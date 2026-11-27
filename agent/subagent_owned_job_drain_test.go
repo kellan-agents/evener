@@ -1205,6 +1205,48 @@ func waitForOwnedJobDrainGeneration(t *testing.T, child *subagent, entered <-cha
 	}
 }
 
+// parkStableAttentionFinalization holds a finished owned shell right after its
+// stable attention arm, before the delivered acknowledgement and its
+// running-map delete. The returned wait function blocks until the child has
+// executed its first tool after the completion wake (the post-check quiet
+// yield); release lets the finalization continue. Cleanup releases the hook so
+// a failed assertion cannot wedge the finalizer.
+func parkStableAttentionFinalization(ctx context.Context, t *testing.T, child *subagent) (wait, release func()) {
+	t.Helper()
+	attentionArmed := make(chan struct{})
+	releaseParked := make(chan struct{})
+	postWakeTool := make(chan struct{})
+	var attentionArmedOnce, releaseOnce, postWakeOnce sync.Once
+	child.sess.jobManager.testOnlyAfterStableAttentionArm = func(string) {
+		attentionArmedOnce.Do(func() {
+			close(attentionArmed)
+			<-releaseParked
+		})
+	}
+	updateSessionTestConfig(child.sess, func(testCfg *testConfig) {
+		testCfg.execToolCheckpoint = func(name string) {
+			if name == "after_execute" {
+				postWakeOnce.Do(func() { close(postWakeTool) })
+			}
+		}
+	})
+	t.Cleanup(func() { releaseOnce.Do(func() { close(releaseParked) }) })
+	wait = func() {
+		select {
+		case <-attentionArmed:
+		case <-ctx.Done():
+			t.Fatal("finished shell finalization never armed its stable attention")
+		}
+		select {
+		case <-postWakeTool:
+		case <-ctx.Done():
+			t.Fatal("delegate never ran the post-completion quiet-yield check")
+		}
+	}
+	release = func() { releaseOnce.Do(func() { close(releaseParked) }) }
+	return wait, release
+}
+
 // requireChildQuiescent waits until every other goroutine in the test's
 // synctest bubble is blocked, then asserts child can take a new generation:
 // no run, drive or finalizer still holds it. A child that is still settling
@@ -1236,8 +1278,10 @@ func requireChildAttentionSettled(t *testing.T, child *subagent, requests func()
 	if len(fold.order) == 0 {
 		t.Fatal("child transcript holds no attention")
 	}
-	if pending := fold.pendingIDs(); len(pending) != 0 {
-		t.Fatalf("child attention still pending = %v, want every presented item consumed", pending)
+	// The store queue is the authority: every presented item must leave it.
+	rows := pendingAttentionRowsForTest(t, child.sess.delegateController, child.sess.owningDelegateID)
+	if len(rows) != 0 {
+		t.Fatalf("child attention still pending = %#v, want every presented item consumed", rows)
 	}
 	if got := len(requests()); got != wantRequests {
 		t.Fatalf("provider requests = %d, want %d: no generation re-presents consumed attention", got, wantRequests)
@@ -1700,21 +1744,26 @@ func TestSubagentOwnedJobDrainQuietYield(t *testing.T) {
 			if reportFirst {
 				steps = append(steps,
 					func(llm.Request) llm.Response {
-						return quietYieldResponse("reported", `{"message":"passed","end_turn":true,"output":{}}`)
+						return quietYieldResponse("reported", `{"message":"passed","next":"send_and_end_turn","output":{}}`)
 					},
-					func(llm.Request) llm.Response { close(afterShell); return quietYieldResponse("quiet", `{}`) },
 					func(llm.Request) llm.Response {
-						return quietYieldResponse("unexpected", `{"message":"overwritten","end_turn":true,"output":{}}`)
+						close(afterShell)
+						return quietYieldResponse("quiet", `{"message":"waiting on work","next":"log_quietly_and_end_turn"}`)
+					},
+					func(llm.Request) llm.Response {
+						return quietYieldResponse("unexpected", `{"message":"overwritten","next":"send_and_end_turn","output":{}}`)
 					},
 				)
 			} else {
 				steps = append(steps,
-					func(llm.Request) llm.Response { return quietYieldResponse("quiet", `{}`) },
 					func(llm.Request) llm.Response {
-						return quietYieldResponse("missing", `{"message":"missing output","end_turn":true}`)
+						return quietYieldResponse("quiet", `{"message":"waiting on work","next":"log_quietly_and_end_turn"}`)
 					},
 					func(llm.Request) llm.Response {
-						return quietYieldResponse("reported", `{"message":"passed","end_turn":true,"output":{}}`)
+						return quietYieldResponse("missing", `{"message":"missing output","next":"send_and_end_turn"}`)
+					},
+					func(llm.Request) llm.Response {
+						return quietYieldResponse("reported", `{"message":"passed","next":"send_and_end_turn","output":{}}`)
 					},
 				)
 			}
@@ -1789,7 +1838,7 @@ func TestSubagentOwnedJobDrainQuietHousekeepingKeepsEarlierReport(t *testing.T) 
 	adapter := newFakeAdapter("openai", func(llm.Request) llm.Response {
 		return quietYieldResponse("reported", `{"message":"passed","output":{"count":0}}`)
 	}, func(llm.Request) llm.Response {
-		return quietYieldResponse("housekeeping", `{}`)
+		return quietYieldResponse("housekeeping", `{"message":"waiting on work","next":"log_quietly_and_end_turn"}`)
 	})
 	cfg := minimalTestSessionConfig(t)
 	cfg.spawn.depth, cfg.spawn.parentSessionID = 1, "test-parent"
@@ -1817,7 +1866,7 @@ func TestSubagentOwnedJobDrainStandingWatchDoesNotAllowQuietYield(t *testing.T) 
 	adapter := newFakeAdapter("openai", func(llm.Request) llm.Response {
 		return agenttest.ToolCallResponse(llm.ToolCallData{ID: "watch", Name: "job_watch", Arguments: json.RawMessage(`{"operation":"create","source":"self","after_seconds":3600}`)})
 	}, func(llm.Request) llm.Response {
-		return quietYieldResponse("quiet", `{}`)
+		return quietYieldResponse("quiet", `{"message":"waiting on work","next":"log_quietly_and_end_turn"}`)
 	}, func(llm.Request) llm.Response {
 		return quietYieldResponse("reported", `{"message":"passed","output":{}}`)
 	})
@@ -1859,12 +1908,12 @@ func TestSubagentOwnedJobDrainQuietYieldAwakesForNestedDelegate(t *testing.T) {
 			llm.ToolCallData{ID: "spawn-b", Name: "delegate", Arguments: json.RawMessage(`{"prompt":"NESTED-LEAF-B: report proof B"}`)},
 		)
 	}, func(llm.Request) llm.Response {
-		return quietYieldResponse("quiet-nested-1", `{}`)
+		return quietYieldResponse("quiet-nested-1", `{"message":"waiting on work","next":"log_quietly_and_end_turn"}`)
 	}, func(req llm.Request) llm.Response {
 		if requestContainsText(req, "LEAF-A-PROOF") {
 			close(leafAWokeCoordinator)
 		}
-		return quietYieldResponse("quiet-nested-2", `{}`)
+		return quietYieldResponse("quiet-nested-2", `{"message":"waiting on work","next":"log_quietly_and_end_turn"}`)
 	}, func(llm.Request) llm.Response {
 		return agenttest.FinalResponse("nested proof received")
 	})
@@ -1941,6 +1990,60 @@ func TestSubagentOwnedJobDrainQuietYieldDefersSubagentStopHook(t *testing.T) {
 		resp.Message.Content = append([]llm.ContentPart{{Kind: llm.ContentText, Text: text}}, resp.Message.Content...)
 		return resp
 	}
+	// stopBlockedSteps drives a Stop-blocked alternate report, a dead quiet
+	// yield, a live background check, then the post-completion quiet yield
+	// whose refusal depends on the finished job having settled.
+	stopBlockedSteps := []func(llm.Request) llm.Response{
+		// 1. Premature report with no background work -> blocked by Stop.
+		func(llm.Request) llm.Response {
+			return assistantAndCommunicate("PREMATURE_NO_WORK", "premature-no-work", `{"message":"premature without job"}`)
+		},
+		// 2. Quiet yield without outstanding work after block must be refused.
+		func(llm.Request) llm.Response {
+			return quietYieldResponse("dead-quiet-after-block", `{"message":"waiting on work","next":"log_quietly_and_end_turn"}`)
+		},
+		// 3. Start background check after dead-wait refusal, then attempt premature report while check runs -> blocked by Stop.
+		func(req llm.Request) llm.Response {
+			deadQuiet := findRequestToolResult(req.Messages, "dead-quiet-after-block")
+			if deadQuiet == nil || !deadQuiet.IsError {
+				return assistantAndCommunicate("DEAD_WAIT_NOT_REFUSED", "bad-report", `{"message":"dead wait unexpectedly succeeded"}`)
+			}
+			return agenttest.ToolCallResponse(llm.ToolCallData{ID: "owned-job", Name: "shell", Arguments: json.RawMessage(`{"command":"go test","mode":"background"}`)})
+		},
+		func(llm.Request) llm.Response {
+			return assistantAndCommunicate("PREMATURE_WHILE_RUNNING", "premature-running", `{"message":"premature while running"}`)
+		},
+		// 4. Quiet yield to wait for the running background check (verifying first-winner capture rejected premature-running while Stop ran).
+		func(req llm.Request) llm.Response {
+			premature := findRequestToolResult(req.Messages, "premature-running")
+			contentStr := ""
+			if premature != nil {
+				contentStr, _ = premature.Content.(string)
+			}
+			if !strings.Contains(contentStr, `"accepted":false`) {
+				return assistantAndCommunicate("SECOND_WINNER_LEAKED", "leaked-report", `{"message":"competing call won while Stop was active"}`)
+			}
+			return quietYieldResponse("quiet-wait-check", `{"message":"waiting on work","next":"log_quietly_and_end_turn"}`)
+		},
+		// 5. On notification wake after check finishes, try quiet yield without having settled a report -> refused, then send final report.
+		func(llm.Request) llm.Response {
+			return quietYieldResponse("post-check-quiet", `{"message":"waiting on work","next":"log_quietly_and_end_turn"}`)
+		},
+		func(req llm.Request) llm.Response {
+			postCheckQuiet := findRequestToolResult(req.Messages, "post-check-quiet")
+			if postCheckQuiet == nil || !postCheckQuiet.IsError {
+				return assistantAndCommunicate("POST_CHECK_QUIET_NOT_REFUSED", "bad-post-check", `{"message":"post-check quiet yield unexpectedly succeeded"}`)
+			}
+			return assistantAndCommunicate("POST_BLOCK_DRAIN_ASSISTANT_PROOF", "verified-report", `{"message":"verified post-check report"}`)
+		},
+	}
+	stopBlockedStopDecisions := []string{
+		`{"decision":"block","reason":"start background check first"}`,
+		`{"decision":"block","reason":"start background check first"}`,
+		`{"decision":"block","reason":"wait for background check"}`,
+		`{"decision":"block","reason":"wait for background check"}`,
+		`{}`,
+	}
 
 	for _, tc := range []struct {
 		name               string
@@ -1950,6 +2053,7 @@ func TestSubagentOwnedJobDrainQuietYieldDefersSubagentStopHook(t *testing.T) {
 		resultSchema       map[string]any
 		steps              []func(llm.Request) llm.Response
 		stopAtDrain        bool
+		parkFinalization   bool
 		wantFiredAtDrain   bool
 		wantStdinSubstring string
 		wantFinalReport    string
@@ -1962,7 +2066,9 @@ func TestSubagentOwnedJobDrainQuietYieldDefersSubagentStopHook(t *testing.T) {
 				func(llm.Request) llm.Response {
 					return agenttest.ToolCallResponse(llm.ToolCallData{ID: "owned-job", Name: "shell", Arguments: json.RawMessage(`{"command":"go test","mode":"background"}`)})
 				},
-				func(llm.Request) llm.Response { return quietYieldResponse("quiet-1", `{}`) },
+				func(llm.Request) llm.Response {
+					return quietYieldResponse("quiet-1", `{"message":"waiting on work","next":"log_quietly_and_end_turn"}`)
+				},
 				func(llm.Request) llm.Response {
 					return assistantAndCommunicate("POST_DRAIN_ASSISTANT_PROOF", "report-1", `{"message":"initial report"}`)
 				},
@@ -1984,8 +2090,12 @@ func TestSubagentOwnedJobDrainQuietYieldDefersSubagentStopHook(t *testing.T) {
 				func(llm.Request) llm.Response {
 					return agenttest.ToolCallResponse(llm.ToolCallData{ID: "owned-job", Name: "shell", Arguments: json.RawMessage(`{"command":"go test","mode":"background"}`)})
 				},
-				func(llm.Request) llm.Response { return quietYieldResponse("quiet-1", `{}`) },
-				func(llm.Request) llm.Response { return quietYieldResponse("quiet-2", `{}`) },
+				func(llm.Request) llm.Response {
+					return quietYieldResponse("quiet-1", `{"message":"waiting on work","next":"log_quietly_and_end_turn"}`)
+				},
+				func(llm.Request) llm.Response {
+					return quietYieldResponse("quiet-2", `{"message":"waiting on work","next":"log_quietly_and_end_turn"}`)
+				},
 				func(llm.Request) llm.Response {
 					return assistantAndCommunicate("POST_NUDGE_ASSISTANT_PROOF", "report-1", `{"message":"nudged report"}`)
 				},
@@ -2004,7 +2114,9 @@ func TestSubagentOwnedJobDrainQuietYieldDefersSubagentStopHook(t *testing.T) {
 				func(llm.Request) llm.Response {
 					return assistantAndCommunicate("PRE_DRAIN_ASSISTANT_PROOF", "report-1", `{"message":"reported early"}`)
 				},
-				func(llm.Request) llm.Response { return quietYieldResponse("quiet-housekeeping", `{}`) },
+				func(llm.Request) llm.Response {
+					return quietYieldResponse("quiet-housekeeping", `{"message":"waiting on work","next":"log_quietly_and_end_turn"}`)
+				},
 			},
 			wantFiredAtDrain:   true,
 			wantStdinSubstring: "PRE_DRAIN_ASSISTANT_PROOF",
@@ -2017,80 +2129,34 @@ func TestSubagentOwnedJobDrainQuietYieldDefersSubagentStopHook(t *testing.T) {
 				func(llm.Request) llm.Response {
 					return agenttest.ToolCallResponse(llm.ToolCallData{ID: "owned-job", Name: "shell", Arguments: json.RawMessage(`{"command":"go test","mode":"background"}`)})
 				},
-				func(llm.Request) llm.Response { return quietYieldResponse("quiet-1", `{}`) },
+				func(llm.Request) llm.Response {
+					return quietYieldResponse("quiet-1", `{"message":"waiting on work","next":"log_quietly_and_end_turn"}`)
+				},
 			},
 			stopAtDrain:      true,
 			wantFiredAtDrain: false,
 		},
 		{
-			name:     "stop_blocked_report_then_quiet_yield",
-			decision: `{}`,
-			childStopDecisions: []string{
-				`{"decision":"block","reason":"start background check first"}`,
-				`{"decision":"block","reason":"start background check first"}`,
-				`{"decision":"block","reason":"wait for background check"}`,
-				`{"decision":"block","reason":"wait for background check"}`,
-				`{}`,
-			},
-			steps: []func(llm.Request) llm.Response{
-				// 1. Premature report with no background work -> blocked by Stop.
-				func(llm.Request) llm.Response {
-					return assistantAndCommunicate("PREMATURE_NO_WORK", "premature-no-work", `{"message":"premature without job"}`)
-				},
-				// 2. Quiet yield without outstanding work after block must be refused.
-				func(llm.Request) llm.Response { return quietYieldResponse("dead-quiet-after-block", `{}`) },
-				// 3. Start background check after dead-wait refusal, then attempt premature report while check runs -> blocked by Stop.
-				func(req llm.Request) llm.Response {
-					var deadQuietFailed bool
-					for _, msg := range req.Messages {
-						for _, part := range msg.Content {
-							if part.Kind == llm.ContentToolResult && part.ToolResult != nil && part.ToolResult.ToolCallID == "dead-quiet-after-block" && part.ToolResult.IsError {
-								deadQuietFailed = true
-							}
-						}
-					}
-					if !deadQuietFailed {
-						return assistantAndCommunicate("DEAD_WAIT_NOT_REFUSED", "bad-report", `{"message":"dead wait unexpectedly succeeded"}`)
-					}
-					return agenttest.ToolCallResponse(llm.ToolCallData{ID: "owned-job", Name: "shell", Arguments: json.RawMessage(`{"command":"go test","mode":"background"}`)})
-				},
-				func(llm.Request) llm.Response {
-					return assistantAndCommunicate("PREMATURE_WHILE_RUNNING", "premature-running", `{"message":"premature while running"}`)
-				},
-				// 4. Quiet yield to wait for the running background check (verifying first-winner capture rejected premature-running while Stop ran).
-				func(req llm.Request) llm.Response {
-					var secondLost bool
-					for _, msg := range req.Messages {
-						for _, part := range msg.Content {
-							if part.Kind == llm.ContentToolResult && part.ToolResult != nil && part.ToolResult.ToolCallID == "premature-running" {
-								if contentStr, ok := part.ToolResult.Content.(string); ok && strings.Contains(contentStr, `"accepted":false`) {
-									secondLost = true
-								}
-							}
-						}
-					}
-					if !secondLost {
-						return assistantAndCommunicate("SECOND_WINNER_LEAKED", "leaked-report", `{"message":"competing call won while Stop was active"}`)
-					}
-					return quietYieldResponse("quiet-wait-check", `{}`)
-				},
-				// 5. On notification wake after check finishes, try quiet yield without having settled a report -> refused, then send final report.
-				func(llm.Request) llm.Response { return quietYieldResponse("post-check-quiet", `{}`) },
-				func(req llm.Request) llm.Response {
-					var postCheckQuietFailed bool
-					for _, msg := range req.Messages {
-						for _, part := range msg.Content {
-							if part.Kind == llm.ContentToolResult && part.ToolResult != nil && part.ToolResult.ToolCallID == "post-check-quiet" && part.ToolResult.IsError {
-								postCheckQuietFailed = true
-							}
-						}
-					}
-					if !postCheckQuietFailed {
-						return assistantAndCommunicate("POST_CHECK_QUIET_NOT_REFUSED", "bad-post-check", `{"message":"post-check quiet yield unexpectedly succeeded"}`)
-					}
-					return assistantAndCommunicate("POST_BLOCK_DRAIN_ASSISTANT_PROOF", "verified-report", `{"message":"verified post-check report"}`)
-				},
-			},
+			name:               "stop_blocked_report_then_quiet_yield",
+			decision:           `{}`,
+			childStopDecisions: stopBlockedStopDecisions,
+			steps:              stopBlockedSteps,
+			wantFiredAtDrain:   false,
+			wantStdinSubstring: "POST_BLOCK_DRAIN_ASSISTANT_PROOF",
+			wantFinalReport:    `"verified post-check report"`,
+		},
+		{
+			// The same sequence with the finished job's finalization held
+			// right after its stable attention arm, before the delivered
+			// acknowledgement and the running-map delete. The notification wake
+			// must still refuse the post-check quiet yield: the completion is
+			// already the delegate's, so the finalizing job is not drainable
+			// work.
+			name:               "stop_blocked_report_then_quiet_yield_parked_finalization",
+			decision:           `{}`,
+			childStopDecisions: stopBlockedStopDecisions,
+			steps:              stopBlockedSteps,
+			parkFinalization:   true,
 			wantFiredAtDrain:   false,
 			wantStdinSubstring: "POST_BLOCK_DRAIN_ASSISTANT_PROOF",
 			wantFinalReport:    `"verified post-check report"`,
@@ -2114,7 +2180,9 @@ func TestSubagentOwnedJobDrainQuietYieldDefersSubagentStopHook(t *testing.T) {
 				func(llm.Request) llm.Response {
 					return assistantAndCommunicate("BLOCKED_HOUSEKEEPING_DRAFT", "housekeeping-draft", `{"message":"blocked housekeeping draft"}`)
 				},
-				func(llm.Request) llm.Response { return quietYieldResponse("quiet-keep-settled", `{}`) },
+				func(llm.Request) llm.Response {
+					return quietYieldResponse("quiet-keep-settled", `{"message":"waiting on work","next":"log_quietly_and_end_turn"}`)
+				},
 			},
 			wantFiredAtDrain:   true,
 			wantStdinSubstring: "SETTLED_PRIMARY_PROOF",
@@ -2133,7 +2201,9 @@ func TestSubagentOwnedJobDrainQuietYieldDefersSubagentStopHook(t *testing.T) {
 				func(llm.Request) llm.Response {
 					return agenttest.ToolCallResponse(llm.ToolCallData{ID: "owned-job", Name: "shell", Arguments: json.RawMessage(`{"command":"go test","mode":"background"}`)})
 				},
-				func(llm.Request) llm.Response { return quietYieldResponse("quiet-1", `{}`) },
+				func(llm.Request) llm.Response {
+					return quietYieldResponse("quiet-1", `{"message":"waiting on work","next":"log_quietly_and_end_turn"}`)
+				},
 				func(llm.Request) llm.Response {
 					return assistantAndCommunicate("DRAIN_STRUCTURED_PROOF", "drain-report", `{"message":"drain report","output":{"ok":true}}`)
 				},
@@ -2141,7 +2211,7 @@ func TestSubagentOwnedJobDrainQuietYieldDefersSubagentStopHook(t *testing.T) {
 					if !requestContainsText(req, "STEER_DURING_SUBAGENT_STOP_KEEP") {
 						return assistantAndCommunicate("MISSING_STEER", "bad-steer", `{"message":"steer missing","output":{"ok":false}}`)
 					}
-					return quietYieldResponse("quiet-after-steer", `{}`)
+					return quietYieldResponse("quiet-after-steer", `{"message":"waiting on work","next":"log_quietly_and_end_turn"}`)
 				},
 			},
 			wantFiredAtDrain:   false,
@@ -2162,7 +2232,9 @@ func TestSubagentOwnedJobDrainQuietYieldDefersSubagentStopHook(t *testing.T) {
 				func(llm.Request) llm.Response {
 					return agenttest.ToolCallResponse(llm.ToolCallData{ID: "owned-job", Name: "shell", Arguments: json.RawMessage(`{"command":"go test","mode":"background"}`)})
 				},
-				func(llm.Request) llm.Response { return quietYieldResponse("quiet-1", `{}`) },
+				func(llm.Request) llm.Response {
+					return quietYieldResponse("quiet-1", `{"message":"waiting on work","next":"log_quietly_and_end_turn"}`)
+				},
 				func(llm.Request) llm.Response {
 					return assistantAndCommunicate("DRAIN_INITIAL_PROOF", "drain-report", `{"message":"drain report","output":{"ok":true}}`)
 				},
@@ -2264,7 +2336,18 @@ func TestSubagentOwnedJobDrainQuietYieldDefersSubagentStopHook(t *testing.T) {
 					}
 				})
 			}
+			var waitParkedFinalization, releaseParkedFinalization func()
+			if tc.parkFinalization {
+				// The drain is parked after the pre-check quiet yield, so the
+				// child's next tool after the completion wake is the post-check
+				// quiet yield this test judges.
+				waitParkedFinalization, releaseParkedFinalization = parkStableAttentionFinalization(ctx, t, child)
+			}
 			env.releaseJob()
+			if tc.parkFinalization {
+				waitParkedFinalization()
+				releaseParkedFinalization()
+			}
 			select {
 			case <-runDone:
 			case <-ctx.Done():

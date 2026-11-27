@@ -129,6 +129,11 @@ type Session struct {
 	// server names are kept so a retry that heals one re-derives the tools.
 	cliMCPServers   map[string]bool
 	cliMCPToolNames map[string]bool
+	// oneShotOmittedTools records ceremony tools omitted solely because
+	// TurnEndsProcess was true (not denied by spawn policy), so default
+	// delegates record eligible notes_* tools as excluded for one-shot mode and
+	// regain them on a persistent resume. Guarded by delegateExclusionsMu.
+	oneShotOmittedTools map[string]bool
 	// cliMCPEvidence is the project-configuration evidence the classification
 	// above was derived from: the file the layer-2 project config resolves to,
 	// what it contained, and whether it existed. The classification is only
@@ -578,7 +583,9 @@ type Session struct {
 	turnStartedAt                 time.Time // wall-clock instant the current turn began (stamped at the processing-begin transition); zero when no turn is in flight. Guarded by mu, like workMillis.
 	lastTurnEndedAt               time.Time // when the last turn ended (stamped by endTurnLocked); seeded from SessionMeta on restore, mapped out via Meta(). Guarded by mu, like workMillis.
 	lastMessage                   string    // the opening of the last agent message the session wrote (S1d, noteAgentMessageLocked); seeded from SessionMeta on restore, mapped out via Meta(). Guarded by mu.
-	turnHistoryBaseline           int       // history index of the first turn belonging to the in-flight turn (captured at round 0, adjusted for mid-turn compaction). Turns at or after it are exempt from N4 replay-provenance filtering (fallback rounds keep today's replay semantics). Guarded by mu.
+	turnHistoryBaseline           int       // history index one past the opening user turn of the in-flight turn (captured when that turn became durable, or at round 0 for a turn that appended none; adjusted for mid-turn compaction). Turns at or after it are exempt from N4 replay-provenance filtering (fallback rounds keep today's replay semantics). Guarded by mu.
+	turnBaselineCaptured          bool      // the opening user turn captured turnHistoryBaseline when it became durable, before UserPromptSubmit could admit steering; round zero keeps that boundary instead of overwriting it with one that already includes the steer. Cleared at each input's start. Guarded by mu.
+	turnInputCarriesImages        bool      // the input the in-flight turn accepted carried image attachments. Their bytes stay on the outbound request even for an image-blind target, so the provider can answer them with its actionable refusal; every older user image is projected out for such a target (#7629). Guarded by mu.
 	history                       []schema.Turn
 	historyRevision               int           // bumped by every publishFoldedHistory publish and every other non-append history mutation (orphaned-tool-result repair, attention-turn replace/remove — see bumpHistoryRevisionLocked), never by an ordinary append. Lets a fold snapshot detect whether a competing publish OR mutation already happened since it started, distinct from the ordinary concurrent appends publishFoldedHistory's merge-back already tolerates. Guarded by mu.
 	persistedAppendLog            []schema.Turn // persisted transcript forms of the append/write pairs since the last fold publication, in append order — the exact forms publishFoldTransaction re-appends after its markers. Pruned wholesale by each successful publication. Guarded by mu.
@@ -902,7 +909,7 @@ type Session struct {
 	restBeforeInput SessionState
 
 	// terminalCommunicateAccepted latches that a communicate with
-	// end_turn=true completed a turn while TurnEndsProcess: the model has
+	// next="send_and_end_turn" completed a turn while TurnEndsProcess: the model has
 	// explicitly ended the turn that ends the process. Unlike comm it is never
 	// reset — the one-shot drain reads it to abandon residue with no live work
 	// behind it, and the round loop reads it to finish an empty post-terminal
@@ -1410,25 +1417,20 @@ type Session struct {
 	// Reset at each turn start. Guarded by attentionMu.
 	attentionCausesMergedIDs map[string]struct{}
 	// attentionAcceptedID is the trigger of an accepted attention generation
-	// that no settled request has presented yet. The accept resolves the
-	// trigger as consumed first, so only this latch tells a fold to keep its
-	// turn; promoteStagedAttentionCoverage clears it. Guarded by attentionMu.
+	// that no settled request has presented yet. The row stays in
+	// delegatestore until it is presented and consumed, so this latch only
+	// records which row the generation carries. Guarded by attentionMu.
 	attentionAcceptedID string
 	// attentionAcceptedCause is the cause of attentionAcceptedID, kept for the
 	// request that presents it (promoteStagedAttentionCoverage). Guarded by
 	// attentionMu.
 	attentionAcceptedCause *provenance.Causal
-	// attentionAutomaticDriveHolds names pending rows a user's stop quieted
-	// from automatic drives, each stamped with the settled generation whose
-	// quiet it carries: the stopped generation's commit left the delegate
-	// armed for every other pending row, and that stale armed wake drives
-	// without a re-arm, so the drive's own reads keep a held row out of its
-	// claim and its riders while the rows the stop never touched still
-	// present. A wake releases only the holds at or below the generation it
-	// supersedes, so a stop that settles after an arm keeps its quiet. The
-	// map is in-memory on purpose: a restart reconciles wakes from the
-	// durable fold, which cannot hold a quiet. Guarded by attentionMu.
-	attentionAutomaticDriveHolds map[string]uint64
+	// attentionAwaitingResolution names the rows a settled request of an
+	// earlier turn presented whose journal resolution append failed. The model
+	// already read them, so they must not trigger another model request; a
+	// paced retry resolves them in delegatestore, and only then may the row
+	// leave PendingAttention. Guarded by attentionMu.
+	attentionAwaitingResolution map[string]struct{}
 
 	// turnNameRetryMu guards turnNameRetry alone. The paced wake it schedules
 	// runs while the session goroutine is mid-stand-down, so it must not queue
@@ -2002,22 +2004,53 @@ func (s *Session) resetJobNotificationRetry() {
 	s.pendingJobNotifsMu.Unlock()
 }
 
+// communicateBoundaryPhase tracks the lifecycle of any visible terminal
+// communicate/result reply within a ProcessInput call.
+type communicateBoundaryPhase uint8
+
+const (
+	commBoundaryNone communicateBoundaryPhase = iota
+	commBoundarySettled
+	commBoundaryStopPending
+	commBoundaryStopBlocked
+)
+
 // communicateResult records whether and how the agent delivered a result via
 // the communicate/result tool during the current ProcessInput call. It is
 // transient — reset at the top of each call, then read back by communicated,
 // communicateOutput, and the turn loop's deliver step. Guarded by s.mu.
 type communicateResult struct {
-	called            bool // terminal communicate/result was invoked this turn
-	updated           bool // non-terminal communicate (end_turn=false) was invoked this turn
+	phase             communicateBoundaryPhase
+	updated           bool // non-terminal communicate (next="send_and_continue") was invoked this turn
 	text              string
 	reply             string
 	output            string // canonical structured output (communicateOutput)
 	structured        any    // raw args["output"] object before communicate canonicalization
-	quietEnd          bool   // quiet yield was accepted without capturing a report
-	stopPending       bool   // terminal acceptance awaits a Stop hook decision
 	stopPendingCallID string // explicit winner whose observation awaits the Stop decision
-	stopBlocked       bool   // a Stop hook blocked the captured reply; preserved only if a later round settles visibly
+	roundQuiet        bool   // quiet yield was accepted in the current tool round
 	roundVisible      bool   // a visible terminal communicate was attempted in the current tool round
+}
+
+func (c communicateResult) hasAccepted() bool { return c.phase != commBoundaryNone }
+
+func (c communicateResult) isUnblocked() bool {
+	return c.phase == commBoundarySettled || c.phase == commBoundaryStopPending
+}
+
+func (c communicateResult) isSettled() bool { return c.phase == commBoundarySettled }
+
+func (c communicateResult) quietBoundary() bool {
+	if !c.roundQuiet {
+		return false
+	}
+	switch c.phase {
+	case commBoundaryNone:
+		return true
+	case commBoundaryStopBlocked:
+		return !c.roundVisible
+	default:
+		return false
+	}
 }
 
 // sessionName holds the session's auto-generated display name and its
@@ -2078,7 +2111,7 @@ func (s *Session) Profile() *provider.Profile { return s.currentProfile() }
 // thread/model/set's hook samples it inside the
 // server's critical section, so a pick accepted mid-turn is readable from
 // thread/read before its boundary commits it - the read half of the acceptance
-// SetModelOn publishes as EventNextModelChanged - and stays readable through
+// SetModel publishes as EventNextModelChanged - and stays readable through
 // the application itself, whose settle is what replaces the pair. A pick
 // newer than the validating one that commits mid-application owns the sample,
 // so the pair never regresses from a committed choice to the pick it
@@ -2272,13 +2305,15 @@ type modelSwitchFence struct {
 	queueWhenBusy bool
 }
 
-// SetModel changes the model used for future LLM calls, reading a bare ref or
-// an "instance/model" ref. When the caller knows which instance it picked,
-// SetModelOn is the door that keeps the two halves distinct.
+// SetModel changes the model used for future LLM calls. An explicit provider
+// pins the target instance unambiguously (essential for upstream-namespaced
+// model IDs like OpenRouter's "anthropic/claude-opus-5"). An empty provider
+// ("") parses model as a bare model on the active instance or an
+// "instance/model" ref.
 //
 // Takes effect on the next request. Returns an error (without changing any
-// session state) when the model ref cannot be resolved to a profile, when the
-// current history contains content the target can't represent (see
+// session state) when model is empty or cannot be resolved to a profile, when
+// the current history contains content the target can't represent (see
 // unrepresentableHistoryKinds), or when the target model fails live
 // membership validation (see validateModelSwitchMembership). On a successful
 // switch, cfg.ModelFallbacks entries that no longer validate against the new
@@ -2295,17 +2330,7 @@ type modelSwitchFence struct {
 // History representability is re-checked at that boundary against the settled
 // history; a switch that fails there surfaces as a transcript warning, is
 // dropped rather than retried, and its acceptance is retracted.
-func (s *Session) SetModel(model string) error {
-	return s.SetModelOn("", model)
-}
-
-// SetModelOn is SetModel for a picker that knows both halves of the choice.
-// An explicit provider names the instance the switch lands on: it decides the
-// target even when the current instance also serves the same model id, which
-// is what OpenRouter's upstream-namespaced ids ("anthropic/claude-opus-5")
-// make ambiguous. An empty provider is SetModel's historic current-instance
-// reading, and model is then the whole ref.
-func (s *Session) SetModelOn(provider, model string) error {
+func (s *Session) SetModel(provider, model string) error {
 	release, admissionErr := s.beginRetirementMutation("admission")
 	if admissionErr != nil {
 		return admissionErr
@@ -3075,10 +3100,10 @@ func (s *Session) applyModelRequestMetadata(req *llm.Request) {
 func (s *Session) communicated() bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.comm.called
+	return s.comm.hasAccepted()
 }
 
-// communicateUpdate reports whether a NON-terminal communicate (end_turn=false)
+// communicateUpdate reports whether a NON-terminal communicate (next="send_and_continue")
 // was called during the most recent ProcessInput invocation. A delegate's
 // missing-report reminder can then acknowledge the update instead of claiming
 // the delegate never called the result tool (#3734).
@@ -3109,17 +3134,31 @@ func (s *Session) communicateStructured() any {
 func (s *Session) communicatedReply() (string, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.comm.reply, s.comm.called
+	return s.comm.reply, s.comm.hasAccepted()
 }
 
 func (s *Session) quietBoundaryLocked() bool {
-	return s.comm.quietEnd && (!s.comm.called || (s.comm.stopBlocked && !s.comm.roundVisible))
+	return s.comm.quietBoundary()
+}
+
+func (s *Session) communicatedUnblockedLocked() bool {
+	return s.comm.isUnblocked()
 }
 
 func (s *Session) communicatedUnblocked() bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.comm.called && !s.comm.stopBlocked
+	return s.communicatedUnblockedLocked()
+}
+
+func (s *Session) communicatedSettledLocked() bool {
+	return s.comm.isSettled()
+}
+
+func (s *Session) communicatedSettled() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.communicatedSettledLocked()
 }
 
 // quietlyYielded reports a quiet boundary, not a visible final reply.
@@ -3129,10 +3168,61 @@ func (s *Session) quietlyYielded() bool {
 	return s.quietBoundaryLocked()
 }
 
+func (s *Session) beginCommunicateRound() {
+	s.mu.Lock()
+	s.comm.roundQuiet = false
+	s.comm.roundVisible = false
+	s.mu.Unlock()
+}
+
 func (s *Session) recordQuietYield() {
 	s.mu.Lock()
-	s.comm.quietEnd = true
+	s.comm.roundQuiet = true
 	s.mu.Unlock()
+}
+
+func (s *Session) clearQuietBoundaryForBatchStop() {
+	s.mu.Lock()
+	if s.quietBoundaryLocked() {
+		s.comm.roundQuiet = false
+	}
+	s.mu.Unlock()
+}
+
+func (s *Session) blockStopBoundary() {
+	s.mu.Lock()
+	if s.comm.hasAccepted() {
+		s.comm.phase = commBoundaryStopBlocked
+	}
+	s.mu.Unlock()
+}
+
+func (s *Session) settleCommunicateBoundary(replacement *string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.comm.hasAccepted() {
+		return false
+	}
+	if id := s.comm.stopPendingCallID; id != "" {
+		s.execution.acceptedCommunicateCallID = id
+		s.execution.replacementReply = replacement
+	}
+	wasPending := s.comm.phase == commBoundaryStopPending || s.comm.phase == commBoundaryStopBlocked
+	s.comm.phase = commBoundarySettled
+	s.comm.roundQuiet = false
+	s.comm.stopPendingCallID = ""
+	s.latestReport = s.comm
+	return wasPending
+}
+
+func (s *Session) discardBlockedForQuietLocked() {
+	if s.comm.phase != commBoundaryStopBlocked {
+		return
+	}
+	s.comm = communicateResult{
+		updated:    s.comm.updated,
+		roundQuiet: s.comm.roundQuiet,
+	}
 }
 
 // acceptCommunicateTerminal is the atomic terminal-result writer for the
@@ -3145,20 +3235,24 @@ func (s *Session) recordQuietYield() {
 // recorded after the lock is released.
 func (s *Session) acceptCommunicateTerminal(ctx context.Context, message, reply, output string, structured any) bool {
 	s.mu.Lock()
-	if s.comm.called {
+	if s.comm.hasAccepted() {
 		s.comm.roundVisible = true
 		s.mu.Unlock()
 		return false
 	}
 	stopPending := s.hasReplyStopHook()
+	phase := commBoundarySettled
+	if stopPending {
+		phase = commBoundaryStopPending
+	}
 	s.comm = communicateResult{
-		called:       true,
+		phase:        phase,
+		updated:      s.comm.updated,
 		text:         message,
 		reply:        reply,
 		output:       output,
 		structured:   structured,
 		roundVisible: true,
-		stopPending:  stopPending,
 	}
 	if stopPending {
 		s.comm.stopPendingCallID = callIDFromContext(ctx)
@@ -3251,6 +3345,14 @@ func (s *Session) envRuntimeDrifted() bool {
 	return s.envTracker != nil && s.envTracker.RuntimeDrifted(s.envRuntimeSnapshot(envctx.Snapshot{}))
 }
 
+// communicateContractDrifted reports whether a restored legacy session has not yet
+// received the active communicate contract superseding its frozen prompt.
+func (s *Session) communicateContractDrifted() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.envTracker != nil && s.envTracker.CommunicateContractDrifted(s.communicateContractLine())
+}
+
 // armEnvContext owes the next request a fresh environment block.
 func (s *Session) armEnvContext() { s.envContextPending.Store(true) }
 
@@ -3287,7 +3389,17 @@ func (s *Session) envRuntimeSnapshot(snap envctx.Snapshot) envctx.Snapshot {
 		snap.ScratchDir = le.SessionScratchDir()
 	}
 	snap.CallableTools, snap.AvailableSkills = envctx.JoinNames(toolNamesFromDefinitions(s.cachedToolDefs)), envctx.JoinNames(skills)
+	snap.CommunicateContract = s.communicateContractLine()
 	return snap
+}
+
+func (s *Session) communicateContractLine() string {
+	name := s.resultToolName()
+	if name == "" {
+		return ""
+	}
+	return fmt.Sprintf(`%s uses required "message" and optional "next" (%q default, %q for progress updates, %q with a brief note to end quietly); this supersedes retired "end_turn" and "{}" instructions from earlier prompts`,
+		name, schema.CommunicateNextSendAndEndTurn, schema.CommunicateNextSendAndContinue, schema.CommunicateNextLogQuietlyAndEndTurn)
 }
 
 // appendEnvironmentContext can persist recovery context without publishing a
@@ -3340,7 +3452,7 @@ func (s *Session) appendEnvironmentContextWithPlacement(publishEvent, beforeTrai
 
 	// Persist the identity with the entry. Model history can be compacted, so
 	// its length cannot name a durable transcript turn.
-	turn := schema.NewTurn(schema.TurnEnvironment, llm.User(block))
+	turn := schema.NewTurn(schema.TurnEnvironment, llm.UserMachinery(block))
 	turn.StableTurnID = "turn_environment_" + ulid.Make().String()
 	// The environment tracker is a durability owner: it may only claim the
 	// model saw a turn once that turn is a record, or a restart renders every
@@ -3670,19 +3782,12 @@ func (s *Session) recordTurnOn(bound context.Context, warn func(events.WarningDa
 // the silent success a nil writer gives, which is why the writer answers with an
 // error rather than dropping the turn.
 
-// writeTranscript records a turn in the durable transcript, holding it if the
-// session has not yet decided whether it has one.
-func (s *Session) writeTranscript(t schema.Turn) error {
-	s.attentionMu.Lock()
-	defer s.attentionMu.Unlock()
-	return s.writeTranscriptLocked(t)
-}
-
-// writeTranscriptLocked is writeTranscript for a caller already holding
-// attentionMu — the fold publication transaction commits the fold's own
-// entries under the same attentionMu hold that decided the publish, so no
-// other writer's entry can interleave between the publish and the fold's
-// compaction markers.
+// writeTranscriptLocked records t in the transcript through the buffered door
+// with attentionMu held, holding t if the transcript writer is not yet
+// attached. Callers such as the fold publication transaction commit entries
+// under the same attentionMu hold that decided the publish, so no other
+// writer's entry can interleave between the publish and the fold's compaction
+// markers.
 func (s *Session) writeTranscriptLocked(t schema.Turn) error {
 	_, err := s.recordTranscriptLocked(t, transcript.DoorBuffered, transcript.PlaceSession)
 	return err
@@ -3734,20 +3839,11 @@ func (s *Session) withEntryModel(t schema.Turn) schema.Turn {
 	return t
 }
 
-// writeTranscriptDurable is writeTranscript with an fsync before returning.
-func (s *Session) writeTranscriptDurable(t schema.Turn) error {
-	err := func() error {
-		s.attentionMu.Lock()
-		defer s.attentionMu.Unlock()
-		return s.writeTranscriptDurableLocked(t)
-	}()
-	s.surfaceTranscriptWarnings()
-	return err
-}
-
-// writeTranscriptDurableLocked is writeTranscriptDurable for a caller
-// already holding attentionMu — an append/write pair
-// (appendTurnAfterTranscriptWrite) or the fold publication transaction.
+// writeTranscriptDurableLocked records t in the transcript through the durable
+// door with attentionMu held, fsyncing an attached writer before returning (and
+// holding t if the transcript writer is not yet attached). Callers such as
+// appendTurnAfterTranscriptWrite invoke it inside their attentionMu hold and
+// drain retained-entry warnings once the lock releases.
 func (s *Session) writeTranscriptDurableLocked(t schema.Turn) error {
 	_, err := s.recordTranscriptLocked(t, transcript.DoorDurable, transcript.PlaceSession)
 	return err
@@ -3927,12 +4023,14 @@ func assistantHistoryMessage(message llm.Message) llm.Message {
 // appendAssistantTurn appends an assistant turn that carries the full response
 // metadata (usage stats and response ID) alongside the message content.
 func (s *Session) appendAssistantTurn(resp llm.Response, finalAttempt ModelAttemptMetadata) error {
-	return s.appendAssistantTurnWithAcceptance(resp, finalAttempt, false)
+	return s.appendAssistantTurnWithAcceptance(resp, finalAttempt, false, false, false)
 }
 
-func (s *Session) appendAssistantTurnWithAcceptance(resp llm.Response, finalAttempt ModelAttemptMetadata, acceptedReply bool) error {
+func (s *Session) appendAssistantTurnWithAcceptance(resp llm.Response, finalAttempt ModelAttemptMetadata, acceptedReply, quietYield, quietCompanion bool) error {
 	t := schema.Turn{
 		AcceptedReply:                   acceptedReply,
+		QuietYield:                      quietYield,
+		QuietCompanion:                  quietCompanion,
 		Kind:                            schema.TurnAssistant,
 		Message:                         assistantHistoryMessage(resp.Message),
 		Timestamp:                       s.sclock().Now().UTC(),

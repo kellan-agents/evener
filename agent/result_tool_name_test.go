@@ -95,7 +95,7 @@ func requireResultToolShape(t *testing.T, sess *Session, name string) {
 		t.Fatalf("result tool %q not registered", name)
 	}
 	props, _ := reg.Definition.Parameters["properties"].(map[string]any)
-	for _, want := range []string{"message", "end_turn"} {
+	for _, want := range []string{"message", "next"} {
 		if _, ok := props[want]; !ok {
 			t.Fatalf("result tool %q lacks communicate's %q parameter: %v", name, want, props)
 		}
@@ -132,6 +132,13 @@ func TestNewSessionRejectsResultToolNameCollidingWithNativeTool(t *testing.T) {
 		{"skill tool", SessionConfig{ResultToolName: "use_skill"}},
 		{"transcript tool", SessionConfig{ResultToolName: "doctor_evener", StateDir: t.TempDir()}},
 		{"compact tool", SessionConfig{ResultToolName: "compact_context"}},
+		// One-shot runs drop ceremony tools after the result tool's collision
+		// check, so their names must still be refused rather than adopted.
+		{"one-shot notes_agent_set tool", SessionConfig{ResultToolName: "notes_agent_set", TurnEndsProcess: true}},
+		{"one-shot notes_read tool", SessionConfig{ResultToolName: "notes_read", TurnEndsProcess: true}},
+		{"one-shot urls_add tool", SessionConfig{ResultToolName: "urls_add", TurnEndsProcess: true}},
+		{"one-shot urls_remove tool", SessionConfig{ResultToolName: "urls_remove", TurnEndsProcess: true}},
+		{"one-shot manage_worktree tool", SessionConfig{ResultToolName: "manage_worktree", TurnEndsProcess: true}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

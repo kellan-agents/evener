@@ -42,6 +42,7 @@ import { navigationStore, resetNavigationStoreForTests } from "../../stores/navi
 import { resetThreadsStoreForTests, setMutationStorageForTests, threadsStore } from "../../stores/threads";
 import { resetTranscriptDisplayStoreForTests, transcriptDisplayStore } from "../../stores/transcriptDisplay";
 import { chordLabel, Dialog, Toast } from "../../widgets";
+import chipStyles from "../../widgets/chip/chip.module.css";
 import { getToasts, resetToastStoreForTests } from "../../widgets/toast/store";
 import { currentAttentionEntryToken } from "../attentionHistory";
 import { NeedsYouProvider } from "../NeedsYouProvider";
@@ -1068,6 +1069,35 @@ test("selecting a free-arg APP-GLOBAL command enters args mode with a pill and p
   expect(screen.getByRole("dialog")).toBeTruthy();
   expect(screen.queryByRole("button", { name: "back to command list" })).toBeNull();
   expect(screen.getByRole("option", { name: /Start with prompt/ })).toBeTruthy();
+});
+
+// The args-mode pill is the shared Chip, and its back control is that Chip's
+// remove slot, not a local button: the chip carries chip.module.css's base and
+// accent classes, and the remove control carries the chip's own remove class.
+// Its glyph is an SVG rather than the "×" text character.
+test("the args-mode back control is the shared Chip remove control and returns to the command list", async () => {
+  const user = userEvent.setup();
+  render(
+    <NeedsYouProvider>
+      <CommandPalette />
+    </NeedsYouProvider>,
+  );
+  act(() => openPalette("/spawn"));
+  await user.click(screen.getByRole("option", { name: /Start with prompt/ }));
+
+  const back = screen.getByRole("button", { name: "back to command list" });
+  expect(back.className.split(" ")).toContain(chipStyles.remove);
+  const chip = back.parentElement;
+  expect(chip?.className.split(" ")).toContain(chipStyles.chip);
+  expect(chip?.className.split(" ")).toContain(chipStyles.accent);
+  expect(back.querySelector("svg")).not.toBeNull();
+  expect(back.textContent).toBe("");
+
+  await user.click(back);
+  // Backed out to command-filter, dialog still open and the input focused.
+  expect(screen.queryByRole("button", { name: "back to command list" })).toBeNull();
+  expect(screen.getByRole("option", { name: /Start with prompt/ })).toBeTruthy();
+  expect(document.activeElement).toBe(screen.getByRole("combobox"));
 });
 
 // --- execution & error surfacing ---

@@ -233,7 +233,7 @@ func (s *Session) prepareModelRequestWithError(ctx context.Context, round int, t
 	// boundary for whatever it folds.
 	if !baselineSynced {
 		s.mu.Lock()
-		if round == 0 {
+		if round == 0 && !s.turnBaselineCaptured {
 			s.turnHistoryBaseline = len(s.history)
 		}
 		s.mu.Unlock()
@@ -241,10 +241,13 @@ func (s *Session) prepareModelRequestWithError(ctx context.Context, round int, t
 	// A fold that took the environment block out of history owes the model a
 	// restatement of it. Only such a fold sets the flag, so a fold that kept the
 	// block still deduplicates, and every other entry kind owns its own append
-	// site — the turn's last message stays what that path left it.
+	// site — the turn's last message stays what that path left it. Round 0
+	// also picks up an unemitted communicate-contract diff for restored legacy
+	// prompts woken by non-user-input turns without injecting unrelated runtime
+	// diffs (such as an idle SetModel before an attention wake).
 	foldRemoved := s.envContextFoldRemoved.Swap(false)
 	mcpRecovered := s.envContextMCPConnected.Swap(false)
-	if foldRemoved || (mcpRecovered && s.envContextDue()) {
+	if foldRemoved || (round == 0 && s.communicateContractDrifted()) || (mcpRecovered && s.envContextDue()) {
 		if err := s.maybeAppendEnvironmentContextBeforeTrailingSteering(); err != nil {
 			return nil, "", nil, llm.Request{}, nil, "", err
 		}
@@ -452,6 +455,7 @@ func (s *Session) prepareModelRequestWithError(ctx context.Context, round int, t
 	untrimmedHistory := history
 	history = projectThinkingForTarget(profile, history)
 	history = projectToolResultMediaFor(profile, history)
+	history = s.projectUserImagesForTarget(profile, history, presentedTurns, scope)
 
 	req = s.buildModelRequest(profile, sys, history, toolDefs, reasoningEffort, toolDefsJSONBytes)
 	req = s.attachFullHistoryInputEstimate(req, historyTurns, len(sys))
@@ -763,7 +767,7 @@ func (s *Session) foldHistoryBeforeRequest(ctx context.Context, round, sysLen in
 			// overwritten by round 0's absolute SET or misapplied against
 			// the wrong version.
 			ok, refused := s.publishFoldTransaction(preManageLen, snapRevision, snapAppends, historyTurns, commit, func(published []schema.Turn, restoredAt []int) {
-				if round == 0 {
+				if round == 0 && !s.turnBaselineCaptured {
 					s.turnHistoryBaseline = len(published)
 				} else {
 					s.rebaseTurnHistoryBaselineAfterFilteredFold(filteredDroppedAt, filteredPreLen, managedLen, injectedTurns, restoredAt)
@@ -1190,6 +1194,99 @@ func projectToolResultMediaFor(profile *provider.Profile, messages []llm.Message
 		out[i] = scope.projectToolResultMedia(out[i])
 	}
 	return out
+}
+
+// projectUserImagesForTarget returns messages with user-message image bytes
+// removed for a target whose row declares no image input. The in-flight turn's
+// attachments — the input it accepted, and any steering message admitted after
+// it started — keep their places so the provider can answer them with its
+// actionable refusal; every older image leaves the outbound copy while the
+// transcript keeps it. Without that split, an image-free follow-up after a
+// switch to a text-only model is rejected for history that model never saw
+// (#7629).
+func (s *Session) projectUserImagesForTarget(profile *provider.Profile, messages []llm.Message, turns []schema.Turn, scope replayScope) []llm.Message {
+	if !targetRulesOutImageHistory(profile) || !slices.ContainsFunc(messages, func(m llm.Message) bool {
+		return m.Role == llm.RoleUser && messageHasUserImage(m)
+	}) {
+		return messages
+	}
+	// from is the message index where the in-flight turn begins. The boundary
+	// is recorded one past the input the turn accepted, so the opening prompt
+	// itself sits before it and is retained by keep below.
+	from := len(expandHistory(turns[:min(max(scope.InFlightFrom, 0), len(turns))], scope))
+	keep := -1
+	if s != nil {
+		s.mu.Lock()
+		carries := s.turnInputCarriesImages
+		s.mu.Unlock()
+		if carries {
+			for i := from - 1; i >= 0; i-- {
+				if messages[i].Role == llm.RoleUser && messageHasUserImage(messages[i]) {
+					keep = i
+					break
+				}
+			}
+		}
+	}
+	var out []llm.Message
+	for i := range messages {
+		if i >= from || i == keep || messages[i].Role != llm.RoleUser || !messageHasUserImage(messages[i]) {
+			if out != nil {
+				out = append(out, messages[i])
+			}
+			continue
+		}
+		// Allocate the projected list on the first payload that has to go:
+		// most histories carry no user images, and this runs on every request.
+		if out == nil {
+			out = make([]llm.Message, 0, len(messages))
+			out = append(out, messages[:i]...)
+		}
+		out = append(out, withoutUserImageParts(messages[i]))
+	}
+	if out == nil {
+		return messages
+	}
+	return out
+}
+
+// targetRulesOutImageHistory reports whether the target's resolved row
+// positively declares an input modality list that excludes images. A row
+// without one states no facts — an unmanaged gateway's ids and a fallback row
+// the catalog cannot describe both resolve that way — so its history images
+// keep flowing and the generic media estimate still prices them. Only a
+// declared text-only row is the shape whose provider refuses a request
+// carrying an attachment (#7629).
+func targetRulesOutImageHistory(profile *provider.Profile) bool {
+	if profile == nil {
+		return false
+	}
+	res := profile.Resolved()
+	return len(res.Caps.InputModalities) > 0 && !res.Caps.AcceptsModality("image")
+}
+
+func messageHasUserImage(m llm.Message) bool {
+	return slices.ContainsFunc(m.Content, func(p llm.ContentPart) bool {
+		return p.Kind == llm.ContentImage && p.Image != nil
+	})
+}
+
+// withoutUserImageParts copies m without its image payloads. A message that
+// held nothing else keeps one machinery note naming the omission, so the
+// outbound conversation never carries an empty user message.
+func withoutUserImageParts(m llm.Message) llm.Message {
+	kept := make([]llm.ContentPart, 0, len(m.Content))
+	for _, p := range m.Content {
+		if p.Kind == llm.ContentImage && p.Image != nil {
+			continue
+		}
+		kept = append(kept, p)
+	}
+	if len(kept) == 0 {
+		kept = append(kept, llm.MachineryText("[attachment omitted: the selected model does not accept image input]"))
+	}
+	m.Content = kept
+	return m
 }
 
 func responsesContinuationTurnKinds(turns []schema.Turn) []string {
@@ -1741,7 +1838,7 @@ func effectiveRecordedInputTokens(usage llm.Usage, fullHistoryEstimate int, hasS
 // /delta/end, skipping start/delta when the assistant already streamed) and appends
 // the assistant turn to history unless the response was empty without phase metadata.
 // It runs under withResponseSideEffects and returns its abort error.
-func (s *Session) emitAssistantResponse(ctx context.Context, resp llm.Response, modelResp sessionModelResponse, txt string, skipHistory bool, finalAttempt ModelAttemptMetadata, acceptedReply bool) error {
+func (s *Session) emitAssistantResponse(ctx context.Context, resp llm.Response, modelResp sessionModelResponse, txt string, skipHistory bool, finalAttempt ModelAttemptMetadata, acceptedReply, quietYield, quietCompanion bool) error {
 	var persistErr error
 	if err := s.withResponseSideEffects(ctx, func() {
 		if !modelResp.StreamedAssistant {
@@ -1750,7 +1847,7 @@ func (s *Session) emitAssistantResponse(ctx context.Context, resp llm.Response, 
 			})
 		}
 		if !skipHistory {
-			persistErr = s.appendAssistantTurnWithAcceptance(resp, finalAttempt, acceptedReply)
+			persistErr = s.appendAssistantTurnWithAcceptance(resp, finalAttempt, acceptedReply, quietYield, quietCompanion)
 			if persistErr != nil {
 				return
 			}
@@ -2128,7 +2225,9 @@ func (s *Session) callModelWithFallback(ctx context.Context, profile *provider.P
 				scope := fallbackSource.scope
 				scope.Instance, scope.Model, scope.WireID, scope.Protocol = fbProfile.ID(), fbProfile.Model(), fbProfile.Resolved().WireID, fbProfile.Protocol()
 				scope.canonicalModel = func(model string) string { return s.canonicalModelID(fbProfile.ID(), model) }
-				fallbackHistory = s.requestMessages(fallbackSource.system, expandHistory(fallbackSource.turns, scope))
+				fallbackTurns := expandHistory(fallbackSource.turns, scope)
+				fallbackHistory = s.requestMessages(fallbackSource.system,
+					s.projectUserImagesForTarget(fbProfile, fallbackTurns, fallbackSource.turns, scope))
 			}
 			fbReq, fallbackRoute, ok := s.responsesContinuationFallbackRequest(fbProfile, req, fallbackHistory, origEffort)
 			if !ok {
@@ -2430,11 +2529,6 @@ type replayScope struct {
 	// turns were already filtered against the full history slice.
 	notesSelfEchoFiltered bool
 
-	// DropThinking strips assistant thinking/redacted_thinking from every
-	// replayed message, including the in-flight turn. See dropsReplayedThinking
-	// for the policy and its exception; provenance rules only apply when this
-	// is false.
-	DropThinking bool
 	// dropsToolResult reports whether the outgoing request must omit this tool
 	// result's media payload — a document the provider already rejected this
 	// session (#4465). Nil keeps every payload.
@@ -2632,14 +2726,13 @@ func omitLegacyWebSearchToolCall(tc *llm.ToolCallData) *llm.ToolCallData {
 	return &cloned
 }
 
-// projectThinkingPart applies the N4 provenance rule and the target's thinking
-// policy to one part. provenanceKeeps is the per-turn rule; false drops every
-// thinking part, except that a Responses target takes the portable plaintext of
-// a foreign turn without its opaque state (#6891). Otherwise the target policy
-// drops plain reasoning, but keeps an encrypted reasoning_details array — wire
-// continuation state the chat adapter must round-trip, not the text #4563
-// measured — with its display text removed. The returned part is the input
-// unchanged when nothing applies.
+// projectThinkingPart applies the N4 provenance rule to one content part.
+// provenanceKeeps is the per-turn eligibility; false drops every thinking part,
+// except that a Responses target keeps the portable plaintext of a foreign turn
+// without its opaque state. Google Interactions thoughts require matching
+// (Instance, WireID) provenance, and non-Interactions thinking parts drop on
+// ProtocolGoogle targets. Otherwise the part returns unchanged; target-level
+// thinking dropping runs separately in projectThinkingForTarget.
 func (rs replayScope) projectThinkingPart(p llm.ContentPart, provenanceKeeps bool) (llm.ContentPart, bool) {
 	if p.Kind != llm.ContentThinking && p.Kind != llm.ContentRedThinking {
 		return p, false
@@ -2648,7 +2741,7 @@ func (rs replayScope) projectThinkingPart(p llm.ContentPart, provenanceKeeps boo
 		if rs.Protocol != registry.ProtocolGoogle || p.Kind != llm.ContentThinking || !p.Thinking.ReplayableGoogleThoughtFor(rs.Instance, rs.WireID) {
 			return p, true
 		}
-		return llm.TrimThinkingForReplay(p, rs.DropThinking)
+		return p, false
 	}
 	if rs.active() && rs.Protocol == registry.ProtocolGoogle {
 		return p, true
@@ -2659,18 +2752,18 @@ func (rs replayScope) projectThinkingPart(p llm.ContentPart, provenanceKeeps boo
 		}
 		return llm.StripOpaqueThinkingForCrossProvider(p)
 	}
-	return llm.TrimThinkingForReplay(p, rs.DropThinking)
+	return p, false
 }
 
-// projectTurnMessage returns t.Message with provider/model-scoped content
-// filtered per the N4 rules for the scope, plus the target's own thinking
-// policy. An inactive scope passes through unchanged (identical to legacy
-// expansion) unless the target policy drops thinking. In-flight turns keep the
-// N4 exemption for non-Google producers but still lose thinking the target does
-// not want, and Google Interactions thoughts always require matching
+// projectTurnMessage returns t.Message with voice presentation, frame escaping,
+// and provider/model-scoped content filtered per the N4 rules for the scope.
+// An inactive scope returns the frame-escaped message without provenance
+// filtering. In-flight turns keep the N4 exemption for non-Google producers,
+// while Google Interactions thoughts always require matching
 // (Instance, WireID) provenance. Completed ProtocolGoogle Grounding outputs,
 // web_search parts, and legacy unprefixed web_search tool pairs are omitted
-// when projecting prior turns.
+// when projecting prior turns. Target-level thinking dropping runs separately
+// in projectThinkingForTarget.
 //
 // Image and non-web_search tool content is never touched. Text content is
 // copied as stored (apart from prior ProtocolGoogle grounded output omission)
@@ -2681,17 +2774,14 @@ func (rs replayScope) projectThinkingPart(p llm.ContentPart, provenanceKeeps boo
 // inherited unknown-authorship copy, is never rewritten.
 func (rs replayScope) projectTurnMessage(t schema.Turn, inFlight bool) llm.Message {
 	t.Message = escapeTurnFrames(t, projectVoicePresentation(t))
-	if !rs.active() && !rs.DropThinking {
+	if !rs.active() {
 		return t.Message
 	}
-	// N4 provenance and the target's thinking policy are independent gates: an
-	// inactive scope keeps the provenance rules off, while a target that does
-	// not want thinking still gets the drop.
 	provenanceKeepsThinking := true
 	keepWebSearch := true
 	omitGoogleGroundedText := false
 	omitLegacyWebSearchTool := false
-	if rs.active() && !inFlight {
+	if !inFlight {
 		provenanceKeepsThinking = rs.thinkingReplayEligible(t)
 		keepWebSearch = rs.webSearchReplayEligible(t)
 		omitGoogleGroundedText = !keepWebSearch && t.Kind == schema.TurnAssistant &&
@@ -2699,8 +2789,7 @@ func (rs replayScope) projectTurnMessage(t schema.Turn, inFlight bool) llm.Messa
 			responseHasServerWebSearch(t.Message.Content)
 	}
 	omitLegacyWebSearchTool = rs.omitsLegacyWebSearchTool(inFlight)
-	// Allocate only when a part actually has to go: the chat drop visits every
-	// replayed message, and most carry no thinking part at all.
+	// Allocate only when a part actually has to change or drop.
 	needsFilter := false
 	for _, p := range t.Message.Content {
 		switch p.Kind {

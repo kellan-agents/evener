@@ -42,6 +42,7 @@ import { foldTurnEntries, intentGroupId, intentRunAt } from "../transcript/toolR
 import { markdownAsRead, messageAsShown, reasoningSummariesAsRead } from "./messageText";
 import { notificationCardsFor, notificationShownTexts } from "./notificationHits";
 import {
+  groupedSystemNoticePlacement,
   type SystemNoticePlacement,
   systemMessageTexts,
   systemNoticePlacement,
@@ -170,13 +171,16 @@ interface ShownSpan {
 // What a steer's or a memory refresh's row shows, read through the same
 // helpers its renderer routes with (SteeringItem's source/kind order and
 // MemoryContextItem's body), so Find, the palette and the row cannot disagree.
-// Null for any other entry.
-function dividerSpans(item: ItemModel): readonly ShownSpan[] | null {
+// Null for any other entry. Cached per item and diagram render version, matching
+// haystacks/thoughtHaystacks, so keystrokes do not re-lex Markdown.
+const dividerSpanCache = new WeakMap<ItemModel, { version: number; spans: readonly ShownSpan[] | null }>();
+
+function computeDividerSpans(item: ItemModel): readonly ShownSpan[] | null {
   if (item.type === "steering") {
     // The human-note kind routes before source: it renders the labeled divider.
     if (item.steeringKind === "human-note") return item.text ? [{ text: item.text, divider: item.id }] : [];
-    // A steer the human typed is a prompt bubble: plain visible text.
-    if (item.source === "user") return item.text ? [{ text: item.text }] : [];
+    // A steer the human typed renders as a Markdown prompt bubble.
+    if (item.source === "user") return item.text ? [{ text: markdownAsRead(item.text) }] : [];
     if (!item.text || isSuppressedSteeringKind(item.steeringKind)) return [];
     // A parent's message is conversation: quoted notification tags in it are
     // text, never cards. Any other steer renders one divider per interstitial
@@ -204,6 +208,14 @@ function dividerSpans(item: ItemModel): readonly ShownSpan[] | null {
     return text === "" ? [] : [{ text, divider: item.id }];
   }
   return null;
+}
+
+function dividerSpans(item: ItemModel, version: number): readonly ShownSpan[] | null {
+  const cached = dividerSpanCache.get(item);
+  if (cached !== undefined && cached.version === version) return cached.spans;
+  const spans = computeDividerSpans(item);
+  dividerSpanCache.set(item, { version, spans });
+  return spans;
 }
 
 /** Whether a row decides what its words are, so its raw `text` is never one of
@@ -272,7 +284,7 @@ function shownTexts(
   }
   // A steer's or a memory refresh's row decides its words (its body folds
   // behind a session-scoped divider), so it never reads its raw text.
-  const spans = dividerSpans(entry.item);
+  const spans = dividerSpans(entry.item, version);
   // A steer paints its interstitial text as dividers and its notification
   // cards beside them; both are words a match can land on.
   if (spans !== null) return [...spans.map((span) => span.text), ...notificationShownTexts(entry.item, version)];
@@ -312,6 +324,13 @@ export function projectedSearchTexts(
   const version = mermaidRenderVersion();
   const shown = new Map<string, readonly string[]>();
   for (const row of transcriptRowsForProjection(projectThread(model, config))) {
+    if (row.kind === "quietYieldGroup") {
+      row.entries.forEach((entry, idx) => {
+        const texts = shownTexts(entry, row.turns[idx]?.source, config, version, model.cwd);
+        if (texts.length > 0) shown.set(entry.item.id, texts);
+      });
+      continue;
+    }
     const turn = row.kind === "intentGroup" ? undefined : row.turn.source;
     for (const entry of row.kind === "intentGroup" ? row.entries : row.turn.entries) {
       const texts = shownTexts(entry, turn, config, version, model.cwd);
@@ -329,7 +348,13 @@ export function findHits(rows: readonly TranscriptBodyRow[], query: string, view
   if (needle === "") return [];
   const version = view.version ?? mermaidRenderVersion();
   const hits: FindHit[] = [];
-  const add = (entry: ProjectedEntry, rowIndex: number, turn: ProjectedTurn | undefined, groupId?: string) => {
+  const add = (
+    entry: ProjectedEntry,
+    rowIndex: number,
+    turn: ProjectedTurn | undefined,
+    groupId?: string,
+    ignoreGroupBaseline = false,
+  ) => {
     if (entry.kind === "item" && entry.item.type === "commandExecution") {
       // A tool call's own lines are classified by where they sit (its intent
       // line, its summary line, its body).
@@ -377,14 +402,27 @@ export function findHits(rows: readonly TranscriptBodyRow[], query: string, view
     // Where the words sit is read only for a matched row: grouping a notice
     // run costs a scan, and Find runs on every keystroke.
     let placement: SystemNoticePlacement | null = null;
-    if (groupId !== undefined) placement = { opens: groupId };
+    if (entry.item.type === "reasoning") {
+      placement =
+        groupId !== undefined
+          ? {
+              opens: [groupId, entryDisplayKey(entry)],
+              ...(ignoreGroupBaseline ? { opensIgnoreBaseline: true } : {}),
+            }
+          : { opens: [entryDisplayKey(entry)] };
+    } else if (groupId !== undefined)
+      placement = groupedSystemNoticePlacement(
+        entry.item,
+        groupId,
+        (rendered) => readable(rendered).includes(needle),
+        ignoreGroupBaseline,
+      );
     // A thought opens its own row; no other rule applies to it.
-    else if (entry.item.type === "reasoning") placement = { opens: entryDisplayKey(entry) };
     else if (turn !== undefined && view.config !== undefined)
       placement = systemNoticePlacement(entry, turn, view.config);
     const { id, callId, roundId } = entry.item;
     const itemId = entry.kind === "intent" ? entry.sourceItemId : id;
-    const opensSession = dividerSpans(entry.item)?.flatMap((span) =>
+    const opensSession = dividerSpans(entry.item, version)?.flatMap((span) =>
       span.divider !== undefined && readable(span.text).includes(needle) ? [span.divider] : [],
     );
     hits.push({
@@ -394,7 +432,7 @@ export function findHits(rows: readonly TranscriptBodyRow[], query: string, view
       ...(callId ? { callId } : {}),
       ...(roundId ? { roundId } : {}),
       ...(placement?.opens !== undefined || disclosures.length > 0
-        ? { opens: [...(placement?.opens !== undefined ? [placement.opens] : []), ...disclosures] }
+        ? { opens: [...(placement?.opens ?? []), ...disclosures] }
         : {}),
       ...(placement?.opensIgnoreBaseline ? { opensIgnoreBaseline: true } : {}),
       ...(opensSession?.length ? { opensSession } : {}),
@@ -403,6 +441,12 @@ export function findHits(rows: readonly TranscriptBodyRow[], query: string, view
   rows.forEach((row, rowIndex) => {
     if (row.kind === "intentGroup") {
       for (const entry of row.entries) add(entry, rowIndex, undefined, row.id);
+      return;
+    }
+    if (row.kind === "quietYieldGroup") {
+      for (const [idx, entry] of row.entries.entries()) {
+        add(entry, rowIndex, row.turns[idx], row.id, true);
+      }
       return;
     }
     // The turn's own entries, laid out the one way the transcript renders them

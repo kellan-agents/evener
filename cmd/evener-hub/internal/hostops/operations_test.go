@@ -19,27 +19,38 @@ import (
 // readTestRecord persists one pending deploy record pinned to the pair.
 func readTestRecord(t *testing.T, store *Store, host, clientOperationID string, generation uint64, incarnationID string) Record {
 	t.Helper()
-	record, err := store.Create(NewRecord{
+	outcome, err := store.Create(OperationCreateRequest{
 		ClientOperationID: clientOperationID,
 		Host:              host,
 		Kind:              KindDeploy,
-		Generation:        generation,
-		IncarnationID:     incarnationID,
+		Pair:              OperationPair{Generation: generation, IncarnationID: incarnationID},
+		BootID:            "test-boot",
+		SequenceBefore:    store.Sequence(),
 	})
 	if err != nil {
 		t.Fatalf("Create(%s/%s): %v", host, clientOperationID, err)
 	}
-	return record
+	return outcome.Record
 }
 
-// mirrorTestBoundary writes one host's boundary triple the way the registry's
-// hub.toml write does.
+// mirrorTestBoundary writes one host's boundary triple via the production
+// HostRecords mirror path.
 func mirrorTestBoundary(t *testing.T, store *Store, host string, generation uint64, incarnationID string, presenceEpoch uint64) {
 	t.Helper()
-	if err := store.MirrorBoundaries(map[string]Boundary{
-		host: {Generation: generation, IncarnationID: incarnationID, PresenceEpoch: presenceEpoch},
-	}, nil); err != nil {
-		t.Fatalf("MirrorBoundaries(%s): %v", host, err)
+	mirror := HostMirror{
+		Boundaries: map[string]Boundary{
+			host: {Generation: generation, IncarnationID: incarnationID, PresenceEpoch: presenceEpoch},
+		},
+	}
+	family, _, imported := store.HostRecords()
+	if !imported {
+		if err := store.ImportHostRecords(HostRecords{}, mirror); err != nil {
+			t.Fatalf("ImportHostRecords(%s): %v", host, err)
+		}
+		return
+	}
+	if err := store.CommitHostRecords(family, mirror); err != nil {
+		t.Fatalf("CommitHostRecords(%s): %v", host, err)
 	}
 }
 
@@ -397,12 +408,12 @@ func TestOperationsReadSerializesUnderTheStoreMutex(t *testing.T) {
 	}
 	for i := range 20 {
 		wg.Go(func() {
-			if _, err := store.Create(NewRecord{
+			if _, err := store.Create(OperationCreateRequest{
 				ClientOperationID: fmt.Sprintf("op-%02d", i),
 				Host:              "m4",
 				Kind:              KindDeploy,
-				Generation:        2,
-				IncarnationID:     "inc-m4",
+				Pair:              OperationPair{Generation: 2, IncarnationID: "inc-m4"},
+				BootID:            "test-boot",
 			}); err != nil {
 				t.Errorf("Create: %v", err)
 			}
